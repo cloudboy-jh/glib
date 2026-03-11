@@ -114,7 +114,7 @@ func NewModel() *model {
 	promptInp := input.New()
 	promptInp.SetPlaceholder("Type value and press enter…")
 	lp := selectx.New()
-	lp.SetPlaceholder("No directories")
+	lp.SetPlaceholder("")
 	lp.Focus()
 	lp.Open()
 	tp := selectx.New()
@@ -153,7 +153,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.inputW = clamp(m.width*6/10, 50, 90)
 		m.inputBox.SetSize(m.inputW-5, 1)
 		m.promptInput.SetSize(max(20, m.width/2), 1)
-		m.localPicker.SetSize(max(28, m.width/2), max(8, min(14, m.bodyHeight()/2)))
+		m.resizeLocalPicker()
 		m.statusBar.SetSize(m.width, 1)
 		return m, nil
 
@@ -427,6 +427,13 @@ func (m *model) View() tea.View {
 }
 
 func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme, dim, bright lipgloss.Style) {
+	const (
+		logoToCardGap = 1
+		cardToHelpGap = 1
+		helpToTipGap  = 1
+		statusGap     = 1
+	)
+
 	wm := lipgloss.NewStyle().
 		Foreground(lipgloss.Color(t.Text.Accent)).
 		Bold(true).
@@ -434,15 +441,26 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 	wmW := lipgloss.Width(wm)
 	wmH := lipgloss.Height(wm)
 
-	panelW := clamp(m.width*7/10, 64, 100)
-	contentW := max(1, panelW-6)
+	contentW := m.projectsContentWidth()
 
 	header := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Accent)).Bold(true).Render("\uf07c  Projects")
 	modeTag := string(m.picker)
 
 	body := ""
 	if m.picker == pickerClone {
-		inputStr := viewString(m.inputBox.View())
+		inputVal := strings.TrimSpace(m.inputBox.Value())
+		if inputVal == "" {
+			inputVal = "Paste git URL (https/ssh)..."
+			inputVal = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render(inputVal)
+		} else {
+			inputVal = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Primary)).Render(inputVal)
+		}
+		inputLine := lipgloss.NewStyle().
+			Width(contentW).
+			PaddingLeft(1).
+			PaddingRight(1).
+			Foreground(lipgloss.Color(t.Text.Primary)).
+			Render(inputVal)
 		recentStr := "no recent projects"
 		if len(m.recent) > 0 {
 			show := m.recent
@@ -453,22 +471,29 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 		}
 		body = lipgloss.JoinVertical(lipgloss.Left,
 			lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render("\uf09b  clone url"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Primary)).Render(inputStr),
+			inputLine,
 			"",
 			lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render(recentStr),
 		)
 	} else {
-		body = lipgloss.JoinVertical(lipgloss.Left,
-			lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render("\ue5ff  root: "+m.localDir),
-			"",
-			viewString(m.localPicker.View()),
-		)
+		root := truncateText("\ue5ff  root: "+m.localDir, contentW)
+		if len(m.localEntries) == 0 {
+			empty := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render("No directories")
+			body = lipgloss.JoinVertical(lipgloss.Left,
+				lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render(root),
+				empty,
+			)
+		} else {
+			body = lipgloss.JoinVertical(lipgloss.Left,
+				lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render(root),
+				viewString(m.localPicker.View()),
+			)
+		}
 	}
 
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		header,
 		lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Primary)).Render("mode: "+modeTag),
-		"",
 		body,
 	)
 
@@ -476,7 +501,7 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 		Background(lipgloss.Color(t.Surface.Panel)).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color(t.Border.Focus)).
-		Padding(1, 2).
+		Padding(0, 1).
 		Width(contentW).
 		Render(content)
 	blockW := lipgloss.Width(block)
@@ -510,19 +535,22 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 	}
 	statusW := lipgloss.Width(status)
 
-	const contentH = 18
-	topPad := max(0, (bodyH-contentH)/2)
+	stackH := wmH + logoToCardGap + blockH + cardToHelpGap + 1 + helpToTipGap + 1
+	if status != "" {
+		stackH += statusGap + 1
+	}
+	topPad := max(0, (bodyH-stackH)/2)
 	y := topPad
 
 	surf.Draw(max(0, (m.width-wmW)/2), y, wm)
-	y += wmH + 2
+	y += wmH + logoToCardGap
 	surf.Draw(max(0, (m.width-blockW)/2), y, block)
-	y += blockH + 1
+	y += blockH + cardToHelpGap
 	surf.Draw(max(0, (m.width-kbdW)/2), y, kbdStr)
-	y += 2
+	y += 1 + helpToTipGap
 	surf.Draw(max(0, (m.width-tipW)/2), y, tipStr)
 	if status != "" {
-		y += 2
+		y += 1 + statusGap
 		surf.Draw(max(0, (m.width-statusW)/2), y, lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render(status))
 	}
 }
@@ -636,7 +664,7 @@ func (m *model) drawOpencodeView(surf *surface.Surface, bodyH int, t theme.Theme
 }
 
 func (m *model) syncStatusBar() {
-	left := "\U000f050e o opencode   \uf044 d diff   \ue702 g git   \uf07c p projects   \U000f050e t theme   \uf00d q quit"
+	left := "\ueea7 o opencode   \uf044 d diff   \ue702 g git   \uf07c p projects   \ue68b t theme   \uf00d q quit"
 	if m.mode == modeOpencode {
 		left = "\uf120 esc return   \ue68b t theme   \uf00d q quit"
 	}
@@ -753,6 +781,42 @@ func (m *model) renderPrompt(t theme.Theme) string {
 
 func (m *model) bodyHeight() int {
 	return max(0, m.height-1)
+}
+
+func (m *model) projectsPanelWidth() int {
+	target := m.width * 40 / 100
+	target = min(target, 62)
+	target = max(target, 42)
+	target = min(target, max(30, m.width-6))
+	return target
+}
+
+func (m *model) projectsContentWidth() int {
+	return max(24, m.projectsPanelWidth()-4)
+}
+
+func (m *model) resizeLocalPicker() {
+	pickerMaxH := max(8, min(12, m.bodyHeight()-10))
+	pickerH := clamp(len(m.localEntries)+1, 8, pickerMaxH)
+	m.localPicker.SetSize(m.projectsContentWidth(), pickerH)
+}
+
+func truncateText(text string, maxWidth int) string {
+	if maxWidth <= 0 || lipgloss.Width(text) <= maxWidth {
+		return text
+	}
+	if maxWidth <= 3 {
+		return text[:maxWidth]
+	}
+	b := strings.Builder{}
+	for _, r := range text {
+		next := b.String() + string(r)
+		if lipgloss.Width(next+"...") > maxWidth {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String() + "..."
 }
 
 func (m *model) refreshGitCmd() tea.Cmd {
@@ -956,6 +1020,7 @@ func (m *model) reloadLocalEntries() error {
 	}
 	m.localEntries = entries
 	m.localPicker.SetItems(projects.ToItems(entries))
+	m.resizeLocalPicker()
 	m.localPicker.Focus()
 	m.localPicker.Open()
 	return nil
