@@ -93,6 +93,18 @@ type localTreeRow struct {
 	Label string
 }
 
+type iconSet struct {
+	Projects string
+	Clone    string
+	Root     string
+	Dot      string
+	Opencode string
+	Diff     string
+	Git      string
+	Quit     string
+	Prompt   string
+}
+
 type model struct {
 	statusBar     *bar.Model
 	inputBox      *input.Model
@@ -123,6 +135,7 @@ type model struct {
 	localScroll   int
 	localListH    int
 	localExpanded map[string]bool
+	icons         iconSet
 }
 
 func NewModel() *model {
@@ -150,6 +163,7 @@ func NewModel() *model {
 		picker:        pickerLocal,
 		localDir:      cwd,
 		localExpanded: map[string]bool{},
+		icons:         resolveIcons(),
 		diff: diffview.State{
 			ShowStaged: false,
 			Source:     "working",
@@ -512,7 +526,7 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 
 	contentW := m.projectsContentWidth()
 
-	header := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Accent)).Bold(true).Render("\uf07c  Projects")
+	header := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Accent)).Bold(true).Render(m.icons.Projects + "  Projects")
 	modeTag := string(m.picker)
 
 	body := ""
@@ -538,14 +552,15 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 			}
 			recentStr = strings.Join(show, "   ")
 		}
+		recentStr = fitLine(recentStr, contentW)
 		body = lipgloss.JoinVertical(lipgloss.Left,
-			lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render("\uf09b  clone url"),
+			lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render(m.icons.Clone+"  clone url"),
 			inputLine,
 			"",
 			lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render(recentStr),
 		)
 	} else {
-		root := truncateText("\ue5ff  root: "+m.localDir, contentW)
+		root := truncateText(m.icons.Root+"  root: "+m.localDir, contentW)
 		if len(m.localEntries) == 0 {
 			empty := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render("No directories")
 			body = lipgloss.JoinVertical(lipgloss.Left,
@@ -581,15 +596,16 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 		kbdStr = dim.Render("toggle picker ") + bright.Render("tab") +
 			dim.Render("   submit ") + bright.Render("enter")
 	} else {
-		kbdStr = dim.Render("move ") + bright.Render("j/k") +
+		kbdStr = dim.Render("move ") + bright.Render("j/k or arrows") +
 			dim.Render("   open/select ") + bright.Render("enter") +
-			dim.Render("   expand/collapse ") + bright.Render("l/h") +
+			dim.Render("   expand ") + bright.Render("l") +
+			dim.Render("   collapse ") + bright.Render("h") +
 			dim.Render("   parent ") + bright.Render("backspace") +
 			dim.Render("   mode ") + bright.Render("tab")
 	}
 	kbdW := lipgloss.Width(kbdStr)
 
-	dot := lipgloss.NewStyle().Foreground(lipgloss.Color(t.State.Info)).Render("\uf111")
+	dot := lipgloss.NewStyle().Foreground(lipgloss.Color(t.State.Info)).Render(m.icons.Dot)
 	tipStr := dot + dim.Render("  terminal workspace. git + agent + diff.")
 	tipW := lipgloss.Width(tipStr)
 
@@ -771,8 +787,9 @@ func (m *model) drawOpencodeView(surf *surface.Surface, bodyH int, t theme.Theme
 		lines = lines[len(lines)-(bodyH-3):]
 	}
 	y := 3
+	lineW := max(10, m.width-4)
 	for _, line := range lines {
-		surf.Draw(2, y, line)
+		surf.Draw(2, y, fitLine(line, lineW))
 		y++
 		if y >= bodyH {
 			break
@@ -781,9 +798,9 @@ func (m *model) drawOpencodeView(surf *surface.Surface, bodyH int, t theme.Theme
 }
 
 func (m *model) syncStatusBar() {
-	left := "\ueea7 o opencode   \uf044 d diff   \ue702 g git   \uf07c p projects   t theme   \uf00d q quit"
+	left := fmt.Sprintf("%s o opencode   %s d diff   %s g git   %s p projects   t theme   %s q quit", m.icons.Opencode, m.icons.Diff, m.icons.Git, m.icons.Projects, m.icons.Quit)
 	if m.mode == modeOpencode {
-		left = "\uf120 esc return   t theme   \uf00d q quit"
+		left = fmt.Sprintf("%s esc return   t theme   %s q quit", m.icons.Prompt, m.icons.Quit)
 	}
 	if m.tunnelBanner != "" {
 		left = m.tunnelBanner
@@ -792,9 +809,17 @@ func (m *model) syncStatusBar() {
 	if m.projectPath != "" {
 		projectLabel = filepath.Base(m.projectPath)
 	}
+	right := fmt.Sprintf("%s  %s  glib %s", string(m.mode), projectLabel, version)
+	if lipgloss.Width(right) > max(8, m.width-2) {
+		right = truncateText(right, max(8, m.width-2))
+	}
+	leftMax := max(0, m.width-lipgloss.Width(right)-1)
+	if lipgloss.Width(left) > leftMax {
+		left = truncateText(left, leftMax)
+	}
 	m.statusBar.SetCards(nil)
 	m.statusBar.SetLeft(left)
-	m.statusBar.SetRight(fmt.Sprintf("%s  %s  glib %s", string(m.mode), projectLabel, version))
+	m.statusBar.SetRight(right)
 }
 
 func (m *model) updatePrompt(msg tea.KeyMsg) tea.Cmd {
@@ -881,16 +906,25 @@ func (m *model) showError(errText string) {
 func (m *model) renderPrompt(t theme.Theme) string {
 	title := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Accent)).Bold(true).Render(m.promptTitle)
 	hint := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render(m.promptHint)
+	availW := max(16, m.width-4)
+	boxW := m.width / 2
+	if boxW < 40 {
+		boxW = 40
+	}
+	if boxW > availW {
+		boxW = availW
+	}
+	bodyW := max(10, boxW-6)
 	body := ""
 	if m.prompt == promptError {
-		body = lipgloss.NewStyle().Foreground(lipgloss.Color(t.State.Danger)).Render(m.errorText)
+		body = lipgloss.NewStyle().Foreground(lipgloss.Color(t.State.Danger)).Render(fitMultiline(m.errorText, bodyW, 4))
 	} else if m.prompt == promptTheme {
 		body = viewString(m.themePicker.View())
 	} else {
 		body = viewString(m.promptInput.View())
 	}
 	box := lipgloss.NewStyle().
-		Width(max(40, m.width/2)).
+		Width(boxW).
 		Background(lipgloss.Color(t.Surface.Panel)).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color(t.Border.Focus)).
@@ -1005,6 +1039,11 @@ func (m *model) activateLocalSelection() {
 		m.rebuildLocalTree()
 		return
 	}
+	if gitops.IsGitRepo(m.localDir) {
+		m.projectPath = m.localDir
+		m.addRecent(m.localDir)
+		m.statusMessage = "project selected"
+	}
 }
 
 func (m *model) expandLocalSelection() {
@@ -1027,13 +1066,6 @@ func (m *model) collapseLocalSelection() {
 	if row.IsDir && row.Path != filepath.Dir(m.localDir) && m.localExpanded[row.Path] {
 		delete(m.localExpanded, row.Path)
 		m.rebuildLocalTree()
-		return
-	}
-	parent := filepath.Dir(m.localDir)
-	if parent != m.localDir {
-		m.localDir = parent
-		m.localExpanded = map[string]bool{}
-		_ = m.reloadLocalEntries()
 	}
 }
 
@@ -1057,18 +1089,26 @@ func (m *model) renderLocalTree(contentW int, t theme.Theme) string {
 	start := clamp(m.localScroll, 0, max(0, len(m.localRows)-m.localListH))
 	end := min(len(m.localRows), start+m.localListH)
 	lineW := max(12, contentW)
+	baseStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color(t.Surface.Panel)).
+		Foreground(lipgloss.Color(t.Text.Primary)).
+		Width(lineW)
+	activeStyle := baseStyle.Copy().
+		Background(lipgloss.Color(t.State.Info)).
+		Foreground(lipgloss.Color(t.Surface.Canvas)).
+		Bold(true)
 	lines := make([]string, 0, m.localListH+1)
 	for row := 0; row < m.localListH; row++ {
 		i := start + row
 		if i >= end {
-			lines = append(lines, "")
+			lines = append(lines, baseStyle.Render(""))
 			continue
 		}
 		prefix := "  "
-		lineStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Primary))
+		lineStyle := baseStyle
 		if i == m.localCursor {
 			prefix = "> "
-			lineStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Accent)).Bold(true)
+			lineStyle = activeStyle
 		}
 		marker := "  "
 		if row == 0 && start > 0 {
@@ -1079,21 +1119,76 @@ func (m *model) renderLocalTree(contentW int, t theme.Theme) string {
 		line := fitLine(marker+prefix+m.localRows[i].Label, lineW)
 		lines = append(lines, lineStyle.Render(line))
 	}
-	footer := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render(
-		fmt.Sprintf("%d/%d", min(len(m.localRows), m.localCursor+1), len(m.localRows)),
-	)
+	footer := lipgloss.NewStyle().
+		Background(lipgloss.Color(t.Surface.Panel)).
+		Foreground(lipgloss.Color(t.Text.Muted)).
+		Width(lineW).
+		Render(
+			fmt.Sprintf("%d/%d", min(len(m.localRows), m.localCursor+1), len(m.localRows)),
+		)
 	lines = append(lines, footer)
 	return lipgloss.JoinVertical(lipgloss.Left, lines...)
 }
 
+func resolveIcons() iconSet {
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("GLIB_ICONS")))
+	safe := iconSet{
+		Projects: "[P]",
+		Clone:    "[C]",
+		Root:     "[R]",
+		Dot:      "*",
+		Opencode: "[O]",
+		Diff:     "[D]",
+		Git:      "[G]",
+		Quit:     "[Q]",
+		Prompt:   "[>]",
+	}
+	nerd := iconSet{
+		Projects: "\uf07c",
+		Clone:    "\uf09b",
+		Root:     "\ue5ff",
+		Dot:      "\uf111",
+		Opencode: "\ueea7",
+		Diff:     "\uf044",
+		Git:      "\ue702",
+		Quit:     "\uf00d",
+		Prompt:   "\uf120",
+	}
+
+	switch mode {
+	case "nerd":
+		return nerd
+	case "safe":
+		return safe
+	case "auto", "":
+		if shouldUseNerdIconsAuto() {
+			return nerd
+		}
+		return safe
+	default:
+		return safe
+	}
+}
+
+func shouldUseNerdIconsAuto() bool {
+	if v := os.Getenv("GLIB_NERD_ICONS"); v == "1" || strings.EqualFold(v, "true") {
+		return true
+	}
+	if v := os.Getenv("NERD_FONT"); v == "1" || strings.EqualFold(v, "true") {
+		return true
+	}
+	return false
+}
+
 func buildTreeRows(entries []projects.Entry, prefix string, expanded map[string]bool) []localTreeRow {
+	g := resolveTreeGlyphs()
 	rows := make([]localTreeRow, 0, len(entries))
 	for i, e := range entries {
-		branch := "├─ "
-		nextPrefix := prefix + "│  "
+		branch := g.Branch
+		nextPrefix := prefix + g.Stem
 		if i == len(entries)-1 {
-			branch = "└─ "
-			nextPrefix = prefix + "   "
+			branch = g.Last
+			nextPrefix = prefix + g.Gap
 		}
 		label := e.Name
 		if e.IsDir {
@@ -1111,6 +1206,38 @@ func buildTreeRows(entries []projects.Entry, prefix string, expanded map[string]
 		}
 	}
 	return rows
+}
+
+type treeGlyphs struct {
+	Branch string
+	Last   string
+	Stem   string
+	Gap    string
+}
+
+func resolveTreeGlyphs() treeGlyphs {
+	if strings.EqualFold(os.Getenv("GLIB_TREE_GLYPHS"), "ascii") {
+		return treeGlyphs{Branch: "|- ", Last: "`- ", Stem: "|  ", Gap: "   "}
+	}
+	if strings.EqualFold(os.Getenv("GLIB_ICONS"), "safe") {
+		return treeGlyphs{Branch: "|- ", Last: "`- ", Stem: "|  ", Gap: "   "}
+	}
+	return treeGlyphs{Branch: "├─ ", Last: "└─ ", Stem: "│  ", Gap: "   "}
+}
+
+func fitMultiline(text string, maxWidth, maxLines int) string {
+	if maxWidth <= 0 || maxLines <= 0 {
+		return ""
+	}
+	parts := strings.Split(strings.ReplaceAll(text, "\r", ""), "\n")
+	out := make([]string, 0, min(len(parts), maxLines))
+	for i := 0; i < len(parts) && len(out) < maxLines; i++ {
+		out = append(out, fitLine(parts[i], maxWidth))
+	}
+	if len(parts) > maxLines {
+		out[maxLines-1] = fitLine(out[maxLines-1]+" ...", maxWidth)
+	}
+	return strings.Join(out, "\n")
 }
 
 func fitLine(text string, maxWidth int) string {
