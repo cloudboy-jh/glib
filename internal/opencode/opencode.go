@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"sync"
@@ -131,4 +132,15 @@ func keyToBytes(k tea.KeyMsg) []byte {
 		return []byte(s)
 	}
 	return nil
+}
+
+func Handoff(projectDir string) error {
+	cmd := exec.Command("opencode")
+	if projectDir != "" {
+		cmd.Dir = projectDir
+	}
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }

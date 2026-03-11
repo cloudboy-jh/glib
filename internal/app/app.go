@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -82,6 +83,16 @@ type opencodeChunkMsg struct {
 	Err  error
 }
 
+type opencodeDoneMsg struct {
+	Err error
+}
+
+type localTreeRow struct {
+	Path  string
+	IsDir bool
+	Label string
+}
+
 type model struct {
 	statusBar     *bar.Model
 	inputBox      *input.Model
@@ -96,6 +107,7 @@ type model struct {
 	projectPath   string
 	recent        []string
 	statusMessage string
+	tunnelBanner  string
 	errorText     string
 	prompt        promptMode
 	promptTitle   string
@@ -106,6 +118,11 @@ type model struct {
 	opencode      opencode.State
 	localDir      string
 	localEntries  []projects.Entry
+	localRows     []localTreeRow
+	localCursor   int
+	localScroll   int
+	localListH    int
+	localExpanded map[string]bool
 }
 
 func NewModel() *model {
@@ -124,14 +141,15 @@ func NewModel() *model {
 
 	cwd, _ := os.Getwd()
 	m := &model{
-		statusBar:   bar.New(),
-		inputBox:    inp,
-		promptInput: promptInp,
-		localPicker: lp,
-		themePicker: tp,
-		mode:        modeProjects,
-		picker:      pickerLocal,
-		localDir:    cwd,
+		statusBar:     bar.New(),
+		inputBox:      inp,
+		promptInput:   promptInp,
+		localPicker:   lp,
+		themePicker:   tp,
+		mode:          modeProjects,
+		picker:        pickerLocal,
+		localDir:      cwd,
+		localExpanded: map[string]bool{},
 		diff: diffview.State{
 			ShowStaged: false,
 			Source:     "working",
@@ -215,7 +233,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case opencodeDoneMsg:
+		if msg.Err != nil {
+			m.tunnelBanner = "opencode -> glib tunnel error"
+			m.showError("opencode failed: " + msg.Err.Error())
+			return m, nil
+		}
+		m.tunnelBanner = "opencode -> glib tunnel closed | back in glib"
+		m.statusMessage = "returned from opencode"
+		return m, nil
+
 	case tea.KeyMsg:
+		if m.tunnelBanner != "" && msg.String() != "o" {
+			m.tunnelBanner = ""
+		}
 		if m.prompt != promptNone {
 			return m, m.updatePrompt(msg)
 		}
@@ -238,13 +269,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "t":
 			m.reloadThemeItems()
-			m.openPrompt(promptTheme, "\ue68b Theme", "j/k move, enter apply, esc cancel", "")
+			m.openPrompt(promptTheme, "Theme", "j/k move, enter apply, esc cancel", "")
 			return m, nil
 		case "o":
-			if m.mode != modeOpencode {
-				return m, m.startOpencodeCmd()
-			}
-			return m, nil
+			return m, m.startOpencodeCmd()
 		case "d":
 			m.mode = modeDiff
 			return m, m.refreshDiffCmd("", "")
@@ -272,7 +300,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if m.mode == modeProjects {
 			switch msg.String() {
-			case "backspace", "h":
+			case "backspace":
 				if m.picker == pickerLocal {
 					parent := filepath.Dir(m.localDir)
 					if parent != m.localDir {
@@ -281,27 +309,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					return m, nil
 				}
+			case "h", "left":
+				if m.picker == pickerLocal {
+					m.collapseLocalSelection()
+					return m, nil
+				}
 			case "enter":
 				if m.picker == pickerLocal {
-					u, cmd := m.localPicker.Update(msg)
-					m.localPicker = u.(*selectx.Model)
-					sel, ok := m.localPicker.Selected()
-					if !ok {
-						return m, nil
-					}
-					entry, found := m.findLocalEntry(sel.Value)
-					if !found {
-						return m, cmd
-					}
-					m.localDir = entry.Path
-					if gitops.IsGitRepo(entry.Path) {
-						m.projectPath = entry.Path
-						m.addRecent(entry.Path)
-						m.statusMessage = "project selected"
-						return m, cmd
-					}
-					_ = m.reloadLocalEntries()
-					return m, cmd
+					m.activateLocalSelection()
+					return m, nil
 				}
 
 				val := strings.TrimSpace(m.inputBox.Value())
@@ -314,6 +330,43 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				defaultDest := projects.DefaultCloneDest(val)
 				m.openPrompt(promptCloneDest, "Clone destination", "Enter destination path", defaultDest)
 				return m, m.promptInput.Focus()
+			case "j", "down":
+				if m.picker == pickerLocal {
+					m.moveLocalCursor(1)
+					return m, nil
+				}
+			case "k", "up":
+				if m.picker == pickerLocal {
+					m.moveLocalCursor(-1)
+					return m, nil
+				}
+			case "pgdown":
+				if m.picker == pickerLocal {
+					m.moveLocalCursor(max(1, m.localListH-2))
+					return m, nil
+				}
+			case "pgup":
+				if m.picker == pickerLocal {
+					m.moveLocalCursor(-max(1, m.localListH-2))
+					return m, nil
+				}
+			case "home":
+				if m.picker == pickerLocal {
+					m.localCursor = 0
+					m.syncLocalScroll()
+					return m, nil
+				}
+			case "end":
+				if m.picker == pickerLocal {
+					m.localCursor = max(0, len(m.localRows)-1)
+					m.syncLocalScroll()
+					return m, nil
+				}
+			case "l", "right":
+				if m.picker == pickerLocal {
+					m.expandLocalSelection()
+					return m, nil
+				}
 			}
 
 			if m.picker == pickerClone {
@@ -321,21 +374,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.inputBox = u.(*input.Model)
 				return m, cmd
 			}
-			u, cmd := m.localPicker.Update(msg)
-			m.localPicker = u.(*selectx.Model)
-			return m, cmd
+			return m, nil
 		}
 
 		if m.mode == modeDiff {
 			switch msg.String() {
 			case "j", "down":
-				m.diff.Scroll = min(m.diff.Scroll+1, max(0, len(m.diff.Lines)-m.bodyHeight()))
+				m.diff.Scroll = min(m.diff.Scroll+1, m.diffMaxScroll())
 			case "k", "up":
 				m.diff.Scroll = max(0, m.diff.Scroll-1)
 			case "pgdown", "ctrl+f":
-				m.diff.Scroll = min(m.diff.Scroll+max(1, m.bodyHeight()/2), max(0, len(m.diff.Lines)-m.bodyHeight()))
+				m.diff.Scroll = min(m.diff.Scroll+max(1, m.diffViewRows()/2), m.diffMaxScroll())
 			case "pgup", "ctrl+b":
-				m.diff.Scroll = max(0, m.diff.Scroll-max(1, m.bodyHeight()/2))
+				m.diff.Scroll = max(0, m.diff.Scroll-max(1, m.diffViewRows()/2))
 			case "s":
 				if m.diff.Source == "commit" {
 					return m, nil
@@ -351,6 +402,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.jumpDiffFile(1)
 			case "[f":
 				m.jumpDiffFile(-1)
+			case "home":
+				m.diff.Scroll = 0
+			case "end":
+				m.diff.Scroll = m.diffMaxScroll()
 			}
 			return m, nil
 		}
@@ -500,7 +555,7 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 		} else {
 			body = lipgloss.JoinVertical(lipgloss.Left,
 				lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render(root),
-				viewString(m.localPicker.View()),
+				m.renderLocalTree(contentW, t),
 			)
 		}
 	}
@@ -528,6 +583,7 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 	} else {
 		kbdStr = dim.Render("move ") + bright.Render("j/k") +
 			dim.Render("   open/select ") + bright.Render("enter") +
+			dim.Render("   expand/collapse ") + bright.Render("l/h") +
 			dim.Render("   parent ") + bright.Render("backspace") +
 			dim.Render("   mode ") + bright.Render("tab")
 	}
@@ -588,8 +644,9 @@ func (m *model) drawDiffView(surf *surface.Surface, bodyH int, t theme.Theme) {
 		Render(title + "  |  " + filepath.Base(m.projectPath))
 	surf.Draw(2, 1, header)
 
+	rangeStart, rangeEnd := m.diffRange()
 	meta := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render(
-		fmt.Sprintf("lines: %d  files: %d  scroll: %d", len(m.diff.Lines), len(m.diff.FileAnchors), m.diff.Scroll),
+		fmt.Sprintf("lines: %d  files: %d  scroll: %d", rangeEnd-rangeStart, len(m.diff.FileAnchors), m.diff.Scroll),
 	)
 	surf.Draw(2, 2, meta)
 
@@ -598,18 +655,43 @@ func (m *model) drawDiffView(surf *surface.Surface, bodyH int, t theme.Theme) {
 		return
 	}
 
-	viewH := max(0, bodyH-5)
-	start := clamp(m.diff.Scroll, 0, max(0, len(m.diff.Lines)-viewH))
-	end := min(len(m.diff.Lines), start+viewH)
-	lineW := max(20, m.width-4)
-	y := 3
+	listX := 2
+	listY := 4
+	listW := 0
+	if len(m.diff.FileAnchors) > 0 && m.width >= 90 {
+		listW = 28
+	}
+
+	if listW > 0 {
+		listTitle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render("files")
+		surf.Draw(listX, listY, listTitle)
+		rows := max(1, bodyH-6)
+		start := windowStart(m.diff.FileAnchorPtr, rows, len(m.diff.FileAnchors))
+		end := min(len(m.diff.FileAnchors), start+rows)
+		for i := start; i < end; i++ {
+			line := fitLine(diffFileLabel(m.diff.Lines[m.diff.FileAnchors[i]]), listW-3)
+			if i == m.diff.FileAnchorPtr {
+				line = lipgloss.NewStyle().Background(lipgloss.Color(t.Surface.Elevated)).Foreground(lipgloss.Color(t.Text.Accent)).Render(line)
+			}
+			surf.Draw(listX, listY+1+(i-start), line)
+		}
+	}
+
+	viewX := 2
+	if listW > 0 {
+		viewX = listX + listW + 2
+	}
+	viewW := max(20, m.width-viewX-2)
+	viewH := m.diffViewRows()
+	start := rangeStart + m.diff.Scroll
+	end := min(rangeEnd, start+viewH)
+	y := 4
 	for i := start; i < end; i++ {
-		line := fitLine(m.diff.Lines[i], lineW)
-		surf.Draw(2, y, diffview.StyleLine(line, t))
+		surf.Draw(viewX, y, diffview.StyleLine(fitLine(m.diff.Lines[i], viewW), t))
 		y++
 	}
 
-	help := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render("j/k move  pgup/pgdown jump  s toggle staged  [f ]f file  r refresh")
+	help := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render("j/k move  pgup/pgdown jump  [f ]f file  home/end  s staged  r refresh")
 	surf.Draw(2, bodyH-1, help)
 }
 
@@ -699,9 +781,12 @@ func (m *model) drawOpencodeView(surf *surface.Surface, bodyH int, t theme.Theme
 }
 
 func (m *model) syncStatusBar() {
-	left := "\ueea7 o opencode   \uf044 d diff   \ue702 g git   \uf07c p projects   \ue68b t theme   \uf00d q quit"
+	left := "\ueea7 o opencode   \uf044 d diff   \ue702 g git   \uf07c p projects   t theme   \uf00d q quit"
 	if m.mode == modeOpencode {
-		left = "\uf120 esc return   \ue68b t theme   \uf00d q quit"
+		left = "\uf120 esc return   t theme   \uf00d q quit"
+	}
+	if m.tunnelBanner != "" {
+		left = m.tunnelBanner
 	}
 	projectLabel := "no-project"
 	if m.projectPath != "" {
@@ -818,6 +903,31 @@ func (m *model) bodyHeight() int {
 	return max(0, m.height-1)
 }
 
+func (m *model) diffViewRows() int {
+	return max(1, m.bodyHeight()-5)
+}
+
+func (m *model) diffRange() (int, int) {
+	if len(m.diff.Lines) == 0 {
+		return 0, 0
+	}
+	if len(m.diff.FileAnchors) == 0 {
+		return 0, len(m.diff.Lines)
+	}
+	ptr := clamp(m.diff.FileAnchorPtr, 0, len(m.diff.FileAnchors)-1)
+	start := m.diff.FileAnchors[ptr]
+	end := len(m.diff.Lines)
+	if ptr+1 < len(m.diff.FileAnchors) {
+		end = m.diff.FileAnchors[ptr+1]
+	}
+	return start, end
+}
+
+func (m *model) diffMaxScroll() int {
+	start, end := m.diffRange()
+	return max(0, (end-start)-m.diffViewRows())
+}
+
 func (m *model) projectsPanelWidth() int {
 	target := m.width * 40 / 100
 	target = min(target, 62)
@@ -832,8 +942,175 @@ func (m *model) projectsContentWidth() int {
 
 func (m *model) resizeLocalPicker() {
 	pickerMaxH := max(8, min(12, m.bodyHeight()-10))
-	pickerH := clamp(len(m.localEntries)+1, 8, pickerMaxH)
-	m.localPicker.SetSize(m.projectsContentWidth(), pickerH)
+	pickerH := clamp(len(m.localRows), 8, pickerMaxH)
+	m.localListH = pickerH
+	m.syncLocalScroll()
+}
+
+func (m *model) moveLocalCursor(delta int) {
+	if len(m.localRows) == 0 {
+		m.localCursor = 0
+		m.localScroll = 0
+		return
+	}
+	m.localCursor = clamp(m.localCursor+delta, 0, len(m.localRows)-1)
+	m.syncLocalScroll()
+}
+
+func (m *model) syncLocalScroll() {
+	if len(m.localRows) == 0 {
+		m.localScroll = 0
+		return
+	}
+	if m.localListH <= 0 {
+		m.localListH = 8
+	}
+	maxScroll := max(0, len(m.localRows)-m.localListH)
+	if m.localCursor < m.localScroll {
+		m.localScroll = m.localCursor
+	}
+	if m.localCursor >= m.localScroll+m.localListH {
+		m.localScroll = m.localCursor - m.localListH + 1
+	}
+	m.localScroll = clamp(m.localScroll, 0, maxScroll)
+}
+
+func (m *model) selectedLocalRow() (localTreeRow, bool) {
+	if len(m.localRows) == 0 {
+		return localTreeRow{}, false
+	}
+	idx := clamp(m.localCursor, 0, len(m.localRows)-1)
+	return m.localRows[idx], true
+}
+
+func (m *model) activateLocalSelection() {
+	row, ok := m.selectedLocalRow()
+	if !ok {
+		return
+	}
+	if row.IsDir {
+		if row.Path == filepath.Dir(m.localDir) {
+			m.localDir = row.Path
+			m.localExpanded = map[string]bool{}
+			_ = m.reloadLocalEntries()
+			return
+		}
+		if gitops.IsGitRepo(row.Path) {
+			m.projectPath = row.Path
+			m.addRecent(row.Path)
+			m.statusMessage = "project selected"
+			return
+		}
+		m.localExpanded[row.Path] = !m.localExpanded[row.Path]
+		m.rebuildLocalTree()
+		return
+	}
+}
+
+func (m *model) expandLocalSelection() {
+	row, ok := m.selectedLocalRow()
+	if !ok || !row.IsDir {
+		return
+	}
+	if row.Path == filepath.Dir(m.localDir) {
+		return
+	}
+	m.localExpanded[row.Path] = true
+	m.rebuildLocalTree()
+}
+
+func (m *model) collapseLocalSelection() {
+	row, ok := m.selectedLocalRow()
+	if !ok {
+		return
+	}
+	if row.IsDir && row.Path != filepath.Dir(m.localDir) && m.localExpanded[row.Path] {
+		delete(m.localExpanded, row.Path)
+		m.rebuildLocalTree()
+		return
+	}
+	parent := filepath.Dir(m.localDir)
+	if parent != m.localDir {
+		m.localDir = parent
+		m.localExpanded = map[string]bool{}
+		_ = m.reloadLocalEntries()
+	}
+}
+
+func (m *model) rebuildLocalTree() {
+	rows := make([]localTreeRow, 0, len(m.localEntries)+8)
+	rows = append(rows, buildTreeRows(m.localEntries, "", m.localExpanded)...)
+	m.localRows = rows
+	if len(m.localRows) == 0 {
+		m.localCursor = 0
+		m.localScroll = 0
+		return
+	}
+	m.localCursor = clamp(m.localCursor, 0, len(m.localRows)-1)
+	m.syncLocalScroll()
+}
+
+func (m *model) renderLocalTree(contentW int, t theme.Theme) string {
+	if len(m.localRows) == 0 {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render("No entries")
+	}
+	start := clamp(m.localScroll, 0, max(0, len(m.localRows)-m.localListH))
+	end := min(len(m.localRows), start+m.localListH)
+	lineW := max(12, contentW)
+	lines := make([]string, 0, m.localListH+1)
+	for row := 0; row < m.localListH; row++ {
+		i := start + row
+		if i >= end {
+			lines = append(lines, "")
+			continue
+		}
+		prefix := "  "
+		lineStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Primary))
+		if i == m.localCursor {
+			prefix = "> "
+			lineStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Accent)).Bold(true)
+		}
+		marker := "  "
+		if row == 0 && start > 0 {
+			marker = "^ "
+		} else if row == m.localListH-1 && end < len(m.localRows) {
+			marker = "v "
+		}
+		line := fitLine(marker+prefix+m.localRows[i].Label, lineW)
+		lines = append(lines, lineStyle.Render(line))
+	}
+	footer := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render(
+		fmt.Sprintf("%d/%d", min(len(m.localRows), m.localCursor+1), len(m.localRows)),
+	)
+	lines = append(lines, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, lines...)
+}
+
+func buildTreeRows(entries []projects.Entry, prefix string, expanded map[string]bool) []localTreeRow {
+	rows := make([]localTreeRow, 0, len(entries))
+	for i, e := range entries {
+		branch := "├─ "
+		nextPrefix := prefix + "│  "
+		if i == len(entries)-1 {
+			branch = "└─ "
+			nextPrefix = prefix + "   "
+		}
+		label := e.Name
+		if e.IsDir {
+			label += "/"
+		}
+		if e.Name == ".." {
+			label = "../"
+		}
+		rows = append(rows, localTreeRow{Path: e.Path, IsDir: e.IsDir, Label: prefix + branch + label})
+		if e.IsDir && e.Name != ".." && expanded[e.Path] {
+			children, err := projects.ReadEntriesWithParent(e.Path, false)
+			if err == nil && len(children) > 0 {
+				rows = append(rows, buildTreeRows(children, nextPrefix, expanded)...)
+			}
+		}
+	}
+	return rows
 }
 
 func fitLine(text string, maxWidth int) string {
@@ -841,6 +1118,19 @@ func fitLine(text string, maxWidth int) string {
 		return ""
 	}
 	return truncateText(text, maxWidth)
+}
+
+func diffFileLabel(diffHeader string) string {
+	parts := strings.Fields(diffHeader)
+	if len(parts) >= 4 {
+		left := strings.TrimPrefix(parts[2], "a/")
+		right := strings.TrimPrefix(parts[3], "b/")
+		if right != "" {
+			return right
+		}
+		return left
+	}
+	return diffHeader
 }
 
 func windowStart(cursor, viewRows, total int) int {
@@ -1008,24 +1298,20 @@ func (m *model) jumpDiffFile(step int) {
 	if m.diff.FileAnchorPtr < 0 {
 		m.diff.FileAnchorPtr = len(m.diff.FileAnchors) - 1
 	}
-	m.diff.Scroll = m.diff.FileAnchors[m.diff.FileAnchorPtr]
+	m.diff.Scroll = 0
 }
 
 func (m *model) startOpencodeCmd() tea.Cmd {
-	if m.opencode.Running {
-		m.mode = modeOpencode
-		return nil
+	targetDir := m.projectPath
+	if targetDir == "" {
+		targetDir = m.localDir
 	}
-
-	state, err := opencode.Start()
-	if err != nil {
-		m.showError("could not start embedded opencode: " + err.Error())
-		m.mode = modeProjects
-		return nil
+	m.tunnelBanner = "glib -> opencode tunnel open | Ctrl+B returns to glib"
+	return func() tea.Msg {
+		time.Sleep(250 * time.Millisecond)
+		err := opencode.Handoff(targetDir)
+		return opencodeDoneMsg{Err: err}
 	}
-	m.opencode = state
-	m.mode = modeOpencode
-	return m.readOpencodeChunkCmd()
 }
 
 func (m *model) readOpencodeChunkCmd() tea.Cmd {
@@ -1073,10 +1359,8 @@ func (m *model) reloadLocalEntries() error {
 		return err
 	}
 	m.localEntries = entries
-	m.localPicker.SetItems(projects.ToItems(entries))
+	m.rebuildLocalTree()
 	m.resizeLocalPicker()
-	m.localPicker.Focus()
-	m.localPicker.Open()
 	return nil
 }
 

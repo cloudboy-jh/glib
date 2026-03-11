@@ -60,19 +60,20 @@ func NormalizePath(p string) (string, error) {
 }
 
 func ReadEntries(dir string) ([]Entry, error) {
+	return ReadEntriesWithParent(dir, true)
+}
+
+func ReadEntriesWithParent(dir string, includeParent bool) ([]Entry, error) {
 	items, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
 	entries := make([]Entry, 0, len(items)+1)
 	parent := filepath.Dir(dir)
-	if parent != dir {
+	if includeParent && parent != dir {
 		entries = append(entries, Entry{Name: "..", Path: parent, IsDir: true})
 	}
 	for _, item := range items {
-		if !item.IsDir() {
-			continue
-		}
 		entries = append(entries, Entry{
 			Name:  item.Name(),
 			Path:  filepath.Join(dir, item.Name()),
