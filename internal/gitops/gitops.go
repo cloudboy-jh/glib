@@ -38,7 +38,7 @@ func RunGit(dir string, args ...string) (string, string, error) {
 	out := strings.TrimSpace(stdout.String())
 	errOut := strings.TrimSpace(stderr.String())
 	if err != nil && errOut != "" {
-		return out, errOut, fmt.Errorf(errOut)
+		return out, errOut, fmt.Errorf("%s", errOut)
 	}
 	return out, errOut, err
 }
@@ -113,7 +113,7 @@ func Clone(url, dest string) (string, error) {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		if stderr.Len() > 0 {
-			return "", fmt.Errorf(strings.TrimSpace(stderr.String()))
+			return "", fmt.Errorf("%s", strings.TrimSpace(stderr.String()))
 		}
 		return "", err
 	}
