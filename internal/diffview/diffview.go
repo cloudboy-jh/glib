@@ -435,8 +435,9 @@ func renderCode(content, fileName string, spans []InlineSpan, inlineBG string, k
 		return highlight(content, fileName, false, t)
 	}
 	b := strings.Builder{}
+	base := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Primary))
 	for _, sp := range spans {
-		h := highlight(sp.Text, fileName, sp.Changed, t)
+		h := base.Render(sp.Text)
 		if sp.Changed && (kind == LineAdd || kind == LineDelete) {
 			h = lipgloss.NewStyle().Background(lipgloss.Color(inlineBG)).Bold(true).Render(h)
 		}

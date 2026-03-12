@@ -9,10 +9,13 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/cloudboy-jh/bentotui/registry/components/badge"
 	"github.com/cloudboy-jh/bentotui/registry/components/bar"
 	"github.com/cloudboy-jh/bentotui/registry/components/input"
+	"github.com/cloudboy-jh/bentotui/registry/components/list"
 	selectx "github.com/cloudboy-jh/bentotui/registry/components/select"
 	"github.com/cloudboy-jh/bentotui/registry/components/surface"
+	wordmarkx "github.com/cloudboy-jh/bentotui/registry/components/wordmark"
 	"github.com/cloudboy-jh/bentotui/theme"
 	"glib/internal/diffview"
 	"glib/internal/gitview"
@@ -21,8 +24,9 @@ import (
 )
 
 const version = "v0.3.0"
+const useMockViews = true
 
-const wordmark = "" +
+const glibWordmark = "" +
 	"██████╗  ██╗     ██╗██████╗ \n" +
 	"██╔════╝ ██║     ██║██╔══██╗\n" +
 	"██║  ███╗██║     ██║██████╔╝\n" +
@@ -166,6 +170,10 @@ func NewModel() *model {
 		icons:         resolveIcons(),
 		diff:          diffview.State{ContextLines: 3},
 	}
+	if useMockViews {
+		m.diff.Files = diffview.MockFiles()
+		m.git = gitview.MockState()
+	}
 	_ = m.reloadLocalEntries()
 	return m
 }
@@ -231,6 +239,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case gitview.OpenDiffMsg:
 		m.mode = modeDiff
+		if useMockViews {
+			m.diff.Files = diffview.MockFiles()
+			m.diff.ScrollY = 0
+			return m, nil
+		}
 		if m.projectPath == "" {
 			return m, nil
 		}
@@ -308,14 +321,47 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "o":
 			return m, m.startOpencodeCmd()
-		case "d":
+		case "D":
 			m.mode = modeDiff
+			if useMockViews {
+				m.diff.Files = diffview.MockFiles()
+				m.diff.ScrollY = 0
+				return m, nil
+			}
+			if m.projectPath == "" {
+				return m, nil
+			}
+			return m, m.refreshDiffCmd("", "", "")
+		case "G":
+			m.mode = modeGit
+			if useMockViews {
+				m.git = gitview.MockState()
+				return m, nil
+			}
+			return m, m.refreshGitCmd()
+		case "d":
+			if m.mode != modeProjects {
+				break
+			}
+			m.mode = modeDiff
+			if useMockViews {
+				m.diff.Files = diffview.MockFiles()
+				m.diff.ScrollY = 0
+				return m, nil
+			}
 			if m.projectPath == "" {
 				return m, nil
 			}
 			return m, m.refreshDiffCmd("", "", "")
 		case "g":
+			if m.mode != modeProjects {
+				break
+			}
 			m.mode = modeGit
+			if useMockViews {
+				m.git = gitview.MockState()
+				return m, nil
+			}
 			return m, m.refreshGitCmd()
 		case "p":
 			if m.mode == modeOpencode {
@@ -530,7 +576,7 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 	wm := lipgloss.NewStyle().
 		Foreground(lipgloss.Color(t.Text.Accent)).
 		Bold(true).
-		Render(wordmark)
+		Render(glibWordmark)
 	wmW := lipgloss.Width(wm)
 	wmH := lipgloss.Height(wm)
 
@@ -652,7 +698,7 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 }
 
 func (m *model) drawDiffView(surf *surface.Surface, bodyH int, t theme.Theme) {
-	if m.projectPath == "" {
+	if !useMockViews && m.projectPath == "" {
 		surf.Draw(2, 1, "No project selected. Use p to choose a project.")
 		return
 	}
@@ -663,29 +709,89 @@ func (m *model) drawDiffView(surf *surface.Surface, bodyH int, t theme.Theme) {
 	if m.diff.FileIdx < 0 || m.diff.FileIdx >= len(m.diff.Files) {
 		m.diff.FileIdx = 0
 	}
+
+	panelX := 1
+	panelY := 0
+	panelW := max(20, m.width-2)
+	panelH := max(6, bodyH)
+	frame := lipgloss.NewStyle().
+		Width(panelW).
+		Height(panelH).
+		Background(lipgloss.Color(t.Surface.Panel)).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(t.Border.Normal)).
+		Render("")
+	surf.Draw(panelX, panelY, frame)
+
+	innerX := panelX + 1
+	innerY := panelY + 1
+	innerW := panelW - 2
+	innerH := panelH - 2
+
+	wm := wordmarkx.New("glib")
+	wm.SetBold(true)
+	tag := badge.New("DIFF")
+	tag.SetVariant(badge.VariantAccent)
+	tag.SetBold(true)
+	headMeta := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render(fmt.Sprintf("%d/%d", m.diff.FileIdx+1, len(m.diff.Files)))
+	headline := viewString(wm.View()) + "  " + viewString(tag.View()) + "  " + headMeta
+	surf.Draw(innerX, innerY, headline)
+
+	rule := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border.Subtle)).Render(strings.Repeat("─", innerW))
+	surf.Draw(innerX, innerY+1, rule)
+
 	file := m.diff.Files[m.diff.FileIdx]
-	rendered := diffview.RenderFile(file, max(20, m.width-4), t, m.diff.ContextLines)
+	rendered := diffview.RenderFile(file, max(20, innerW), t, m.diff.ContextLines)
 
-	header := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Accent)).Bold(true).Render(
-		fmt.Sprintf("%d/%d  %s", m.diff.FileIdx+1, len(m.diff.Files), filepath.Base(m.projectPath)),
-	)
-	surf.Draw(2, 1, header)
-
-	viewH := max(1, bodyH-3)
+	viewH := max(1, innerH-3)
 	start := clamp(m.diff.ScrollY, 0, max(0, len(rendered.Lines)-viewH))
 	end := min(len(rendered.Lines), start+viewH)
-	y := 2
+	y := innerY + 2
 	for i := start; i < end; i++ {
-		surf.Draw(2, y, rendered.Lines[i])
+		surf.Draw(innerX, y, rendered.Lines[i])
 		y++
 	}
+
+	meta := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render(
+		fmt.Sprintf("%s  +%d -%d  lines %d-%d/%d", diffFileLabel(file.NewName), file.Added, file.Deleted, start+1, end, len(rendered.Lines)),
+	)
+	surf.Draw(innerX, panelY+panelH-2, fitLine(meta, innerW))
 }
 
 func (m *model) drawGitView(surf *surface.Surface, bodyH int, t theme.Theme) {
-	if m.projectPath == "" {
+	if !useMockViews && m.projectPath == "" {
 		surf.Draw(2, 1, "No project selected. Use p to choose a project.")
 		return
 	}
+
+	panelX := 1
+	panelY := 0
+	panelW := max(20, m.width-2)
+	panelH := max(8, bodyH)
+	frame := lipgloss.NewStyle().
+		Width(panelW).
+		Height(panelH).
+		Background(lipgloss.Color(t.Surface.Panel)).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(t.Border.Normal)).
+		Render("")
+	surf.Draw(panelX, panelY, frame)
+
+	innerX := panelX + 1
+	innerY := panelY + 1
+	innerW := panelW - 2
+	innerH := panelH - 2
+
+	wm := wordmarkx.New("glib")
+	wm.SetBold(true)
+	tag := badge.New("GIT")
+	tag.SetVariant(badge.VariantAccent)
+	tag.SetBold(true)
+	top := viewString(wm.View()) + "  " + viewString(tag.View())
+	surf.Draw(innerX, innerY, top)
+	rule := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border.Subtle)).Render(strings.Repeat("─", innerW))
+	surf.Draw(innerX, innerY+1, rule)
+
 	branchLine := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Accent)).Bold(true).Render(m.git.Branch)
 	track := m.git.Tracking
 	if track == "" {
@@ -698,28 +804,42 @@ func (m *model) drawGitView(surf *surface.Surface, bodyH int, t theme.Theme) {
 	if m.git.Behind > 0 {
 		sync += lipgloss.NewStyle().Foreground(lipgloss.Color(t.State.Warning)).Render(fmt.Sprintf(" ↓%d", m.git.Behind))
 	}
-	surf.Draw(2, 1, branchLine+lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render(" <- "+track)+sync)
+	surf.Draw(innerX, innerY+2, fitLine(branchLine+lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render(" <- "+track)+sync, innerW))
 
 	summary := fmt.Sprintf("%d changed  %d staged  +%d -%d", m.git.ChangedTotal, m.git.StagedTotal, m.git.AddedTotal, m.git.DeletedTotal)
-	surf.Draw(2, 2, lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render(summary))
+	surf.Draw(innerX, innerY+3, fitLine(lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render(summary), innerW))
+	surf.Draw(innerX, innerY+4, rule)
 
 	rows := m.git.Rows()
-	maxRows := max(1, bodyH-7)
+	listY := innerY + 5
+	bodyHRows := max(6, innerH-8)
+	maxRows := bodyHRows
 	start := windowStart(m.git.Cursor, maxRows, len(rows))
 	end := min(len(rows), start+maxRows)
-	lineW := max(20, m.width-4)
-	y := 4
+	lineW := max(20, innerW)
+
+	leftW := max(30, innerW*62/100)
+	rightW := max(20, innerW-leftW-2)
+	leftList := list.New(400)
+	selectedPath := ""
+	selectedStats := ""
+	selectedStatus := ""
 	for i := start; i < end; i++ {
 		row := rows[i]
 		if row.IsHeader() {
-			surf.Draw(2, y, lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Faint(true).Render(row.Label))
-			y++
+			header := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Bold(true).Render(strings.ToUpper(row.Label))
+			leftList.Append(header)
 			continue
 		}
 		f := row.File
 		cursor := " "
+		rowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Primary))
 		if i == m.git.Cursor {
-			cursor = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Accent)).Render("▸")
+			cursor = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Accent)).Bold(true).Render("▸")
+			rowStyle = rowStyle.Background(lipgloss.Color(t.Surface.Elevated))
+			selectedPath = f.Path
+			selectedStatus = f.Status
+			selectedStats = fmt.Sprintf("+%d -%d", f.Added, f.Deleted)
 		}
 		statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted))
 		switch f.Status {
@@ -731,23 +851,43 @@ func (m *model) drawGitView(surf *surface.Surface, bodyH int, t theme.Theme) {
 			statusStyle = statusStyle.Foreground(lipgloss.Color(t.State.Danger))
 		case "R":
 			statusStyle = statusStyle.Foreground(lipgloss.Color(t.State.Info))
+		case "?":
+			statusStyle = statusStyle.Foreground(lipgloss.Color(t.Text.Muted))
 		}
-		path := stylePath(f.Path, t)
-		stats := lipgloss.NewStyle().Foreground(lipgloss.Color(t.State.Success)).Render(fmt.Sprintf("+%d", f.Added)) + " " + lipgloss.NewStyle().Foreground(lipgloss.Color(t.State.Danger)).Render(fmt.Sprintf("-%d", f.Deleted))
-		base := fmt.Sprintf("%s %s  %s", cursor, statusStyle.Render(f.Status), path)
-		pad := max(1, lineW-lipgloss.Width(base)-lipgloss.Width(stats))
-		line := base + strings.Repeat(" ", pad) + stats
-		if i == m.git.Cursor {
-			line = lipgloss.NewStyle().Background(lipgloss.Color(t.Surface.Elevated)).Width(lineW).Render(line)
-		}
-		surf.Draw(2, y, line)
-		y++
+		path := truncateText(f.Path, max(10, leftW-20))
+		stats := lipgloss.NewStyle().Foreground(lipgloss.Color(t.State.Success)).Render(fmt.Sprintf("+%d", f.Added)) +
+			" " + lipgloss.NewStyle().Foreground(lipgloss.Color(t.State.Danger)).Render(fmt.Sprintf("-%d", f.Deleted))
+		plain := fmt.Sprintf("%s %s  %s", cursor, statusStyle.Render(f.Status), path)
+		pad := max(1, leftW-lipgloss.Width(plain)-lipgloss.Width(stats)-1)
+		line := plain + strings.Repeat(" ", pad) + stats
+		leftList.Append(rowStyle.Width(leftW).Render(line))
+	}
+
+	leftList.SetSize(leftW, bodyHRows)
+	surf.Draw(innerX, listY, viewString(leftList.View()))
+
+	rightX := innerX + leftW + 2
+	label := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render("Selection")
+	surf.Draw(rightX, listY, label)
+	surf.Draw(rightX, listY+1, lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border.Subtle)).Render(strings.Repeat("─", rightW)))
+	selectedPath = truncateText(selectedPath, rightW)
+	surf.Draw(rightX, listY+2, lipgloss.NewStyle().Bold(true).Render(selectedPath))
+	surf.Draw(rightX, listY+3, lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render("Status: ")+selectedStatus)
+	surf.Draw(rightX, listY+4, lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render("Stats: ")+selectedStats)
+	keys := []string{
+		"enter open diff",
+		"s stage  u unstage",
+		"d discard  c commit",
+		"p push  D diff",
+	}
+	for i, k := range keys {
+		surf.Draw(rightX, listY+6+i, lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render(k))
 	}
 
 	if m.git.LastCommit.Hash != "" {
 		last := lipgloss.NewStyle().Foreground(lipgloss.Color(t.State.Info)).Render(m.git.LastCommit.Hash) +
 			"  " + m.git.LastCommit.Message + "  " + lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text.Muted)).Render("· "+gitview.RelativeTime(m.git.LastCommit.Time))
-		surf.Draw(2, bodyH-2, truncateText(last, lineW))
+		surf.Draw(innerX, panelY+panelH-2, truncateText(last, lineW))
 	}
 }
 
@@ -779,11 +919,11 @@ func (m *model) syncStatusBar() {
 	left := fmt.Sprintf("%s o opencode   %s d diff   %s g git   %s p projects   t theme   %s q quit", m.icons.Opencode, m.icons.Diff, m.icons.Git, m.icons.Projects, m.icons.Quit)
 	rightMode := string(m.mode)
 	if m.mode == modeDiff {
-		left = "j/k scroll   { } hunk   n/N file   q back"
+		left = "j/k scroll   { } hunk   n/N file   G git   q back"
 		rightMode = "DIFF"
 	}
 	if m.mode == modeGit {
-		left = "j/k move   enter diff   s stage   u unstage   d discard   c commit   p push   q back"
+		left = "j/k move   enter diff   s stage   u unstage   d discard   c commit   p push   D diff   q back"
 		rightMode = "GIT"
 	}
 	if m.mode == modeOpencode {
@@ -1309,6 +1449,13 @@ func truncateText(text string, maxWidth int) string {
 }
 
 func (m *model) refreshGitCmd() tea.Cmd {
+	if useMockViews {
+		return func() tea.Msg {
+			state := gitview.MockState()
+			state.Cursor = m.git.Cursor
+			return gitRefreshMsg{State: state}
+		}
+	}
 	if m.projectPath == "" {
 		m.showError("select a project first")
 		return nil
@@ -1327,6 +1474,11 @@ func (m *model) refreshGitCmd() tea.Cmd {
 }
 
 func (m *model) refreshDiffCmd(source, commitSHA, selectedPath string) tea.Cmd {
+	if useMockViews {
+		return func() tea.Msg {
+			return diffRefreshMsg{Files: diffview.MockFiles(), Source: "mock", SelectedPath: selectedPath}
+		}
+	}
 	if m.projectPath == "" {
 		m.showError("select a project first")
 		return nil
@@ -1374,6 +1526,13 @@ func (m *model) refreshDiffCmd(source, commitSHA, selectedPath string) tea.Cmd {
 }
 
 func (m *model) stageFileCmd() tea.Cmd {
+	if useMockViews {
+		return func() tea.Msg {
+			state := gitview.MockState()
+			state.Cursor = m.git.Cursor
+			return gitRefreshMsg{State: state, Action: "mock: staged file"}
+		}
+	}
 	f, ok := m.git.SelectedFile()
 	if !ok {
 		return nil
@@ -1391,6 +1550,13 @@ func (m *model) stageFileCmd() tea.Cmd {
 }
 
 func (m *model) unstageFileCmd() tea.Cmd {
+	if useMockViews {
+		return func() tea.Msg {
+			state := gitview.MockState()
+			state.Cursor = m.git.Cursor
+			return gitRefreshMsg{State: state, Action: "mock: unstaged file"}
+		}
+	}
 	f, ok := m.git.SelectedFile()
 	if !ok {
 		return nil
@@ -1408,6 +1574,13 @@ func (m *model) unstageFileCmd() tea.Cmd {
 }
 
 func (m *model) discardFileCmd(path string) tea.Cmd {
+	if useMockViews {
+		return func() tea.Msg {
+			state := gitview.MockState()
+			state.Cursor = m.git.Cursor
+			return gitRefreshMsg{State: state, Action: "mock: discarded " + path}
+		}
+	}
 	return func() tea.Msg {
 		if err := gitview.DiscardFile(m.projectPath, path); err != nil {
 			return gitRefreshMsg{Err: err}
@@ -1421,6 +1594,13 @@ func (m *model) discardFileCmd(path string) tea.Cmd {
 }
 
 func (m *model) commitCmd(message string) tea.Cmd {
+	if useMockViews {
+		return func() tea.Msg {
+			state := gitview.MockState()
+			state.Cursor = m.git.Cursor
+			return gitRefreshMsg{State: state, Action: "mock: commit created"}
+		}
+	}
 	return func() tea.Msg {
 		if err := gitview.Commit(m.projectPath, message); err != nil {
 			return gitRefreshMsg{Err: err}
@@ -1434,6 +1614,13 @@ func (m *model) commitCmd(message string) tea.Cmd {
 }
 
 func (m *model) pushCmd() tea.Cmd {
+	if useMockViews {
+		return func() tea.Msg {
+			state := gitview.MockState()
+			state.Cursor = m.git.Cursor
+			return gitRefreshMsg{State: state, Action: "mock: pushed"}
+		}
+	}
 	return func() tea.Msg {
 		if err := gitview.Push(m.projectPath); err != nil {
 			return gitRefreshMsg{Err: err}
