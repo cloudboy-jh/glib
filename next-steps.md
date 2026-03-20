@@ -1,58 +1,26 @@
 # glib Next Steps
 
-## Immediate (This PR)
+## Current Focus
 
-- Finalize native LOCAL picker polish (bontree-style behavior, Bento-consistent rendering).
-- Lock footer to one stable full-width row with clean spacing and mode status.
-- Stabilize theme picker interactions and glyph consistency.
-- Add focused docs for current behavior and keymaps.
+- Lock diff embedding behavior now that bento-diffs viewer integration is live.
+- Keep a single glib-owned footer contract across all modes.
+- Add smoke checks for project -> git -> diff navigation loops.
 
-### Immediate Contracts
+## Short-Term
 
-- **Opencode process**
-  - Trigger: `o`
-  - Embedded PTY when supported
-  - Exit: `esc` / `ctrl+b`
-  - Windows fallback: non-crashing return to `PROJECTS`
-- **Projects workflow**
-  - `LOCAL`: native in-app directory picker only
-  - `CLONE`: paste URL -> destination prompt -> `git clone`
-  - Auth: rely on existing Git credentials (`gh auth`, SSH, GCM)
-- **Footer**
-  - Single row only
-  - Left: actions
-  - Right: mode + project + version
+- Add tests around diff source selection (`working` vs `commit`) and selected-path mapping.
+- Add snapshot-style visual checks for diff mode ANSI output preservation.
+- Harden opencode lifecycle error handling for abrupt PTY termination.
 
-## 1.0 Version Scope
+## 1.0 Readiness
 
-- Stable mode contracts for `PROJECTS`, `DIFF`, `GIT`, `OPENCODE`.
-- Reliable project selection and clone flow.
-- Deterministic diff and git refresh behavior.
-- Opencode lifecycle hardened (start, stream, exit, errors).
-- Smoke-test checklist required before release.
+- Stable behavior for `PROJECTS`, `DIFF`, `GIT`, `OPENCODE` mode transitions.
+- No duplicate chrome/footer across embedded views.
+- Deterministic theme and resize behavior in every mode.
+- Release checklist documented and executable.
 
-### 1.0 Definition of Done
+## Docs To Maintain
 
-- LOCAL picker interaction feels smooth and predictable.
-- Footer remains visually stable across all modes.
-- No crash path when binaries or PTY support are missing.
-- Contracts are documented and match code behavior.
-
-## Roadmap (Post-1.0)
-
-- Expand docs and architecture notes under `docs/`.
-- Add release checklist and troubleshooting guide.
-- Improve mode-specific UX polish (density, spacing, status context).
-- Add automated checks for core git/project flows.
-
-### Suggested Docs Layout
-
-```text
-docs/
-  architecture.md
-  opencode-process.md
-  projects-flow.md
-  keymap.md
-  smoke-tests.md
-  release-checklist.md
-```
+- `README.md`: operator-facing usage and keymap
+- `spec.md`: behavior contracts and architecture notes
+- `BENTODIFFS_INTEGRATION.md`: integration status and guardrails

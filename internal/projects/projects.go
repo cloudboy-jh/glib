@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	selectx "github.com/cloudboy-jh/bentotui/registry/components/select"
+	selectx "github.com/cloudboy-jh/bentotui/registry/bricks/select"
 )
 
 type Entry struct {

@@ -1,124 +1,69 @@
-# glib — spec v0.1
+# glib spec (current)
 
-**Type**: BentoTUI app  
-**Stack**: Go, BubbleTea, Lipgloss, BentoTUI (github.com/cloudboy-jh/bentotui@main)  
-**Tagline**: terminal workspace. git + agent + diff.
-
----
+Type: BentoTUI app
+Stack: Go, Bubble Tea v2, Lipgloss v2, BentoTUI, bento-diffs
+Tagline: terminal workspace. git + agent + diff.
 
 ## Overview
 
-glib is a terminal workspace app built on BentoTUI. Run `glib` anywhere — the home screen opens as a project picker. Select a project and each view takes over the full canvas. The footer is always glib's, even inside opencode.
+glib is a full-screen terminal workspace with four modes:
 
----
+- `PROJECTS`: local tree picker and clone flow
+- `DIFF`: embedded bento-diffs viewer (glib shell)
+- `GIT`: repo status/stage/commit/push workflow
+- `OPENCODE`: subprocess handoff and return tunnel
 
-## Home Screen
+Footer ownership is global: glib always owns the bottom footer row.
 
-The BentoTUI starter app shell, repurposed as glib's launch screen.
+## Mode Contracts
 
-- **Wordmark**: `glib` in slant ascii, centered
-- **Input block**: project search / path entry, recent projects shown in hint row
-- **Tagline**: `● terminal workspace. git + agent + diff.`
-- **Footer**: `o opencode   d diff   g git   p projects   q quit` / `glib v0.1.0`
+### Projects (`p`)
 
-`enter` on a path or selected project → opens that project in the active view  
-`glib .` skips the picker and opens CWD directly (future flag)
+- Local picker with expandable tree navigation
+- Clone picker: paste URL, confirm destination, run clone
+- Project selection updates active repo context for git/diff modes
 
----
+### Diff (`d`)
 
-## Views
+- Patch source comes from git (`git diff` or `git show`)
+- Parsing uses `bentodiffs.ParseUnifiedDiffs`
+- Rendering/navigation uses embedded `bentodiffs.NewViewer`
+- glib key routing forwards movement to viewer imperative methods
+- Viewer footer is intentionally hidden; glib footer remains visible
 
-All views are full-canvas. Footer (1 row) always belongs to glib.
+Diff keys:
 
-### `o` — opencode
-- Spawns `opencode` as a subprocess in a pty
-- opencode owns the full canvas minus the footer row
-- Footer shows active mode: `OPENCODE` on right slot
-- `esc` or `ctrl+b` suspends opencode, returns to glib home
+- `j/k`, `down/up`: line scroll
+- `ctrl+d`/`pgdown`: half-page down
+- `ctrl+u`/`pgup`: half-page up
+- `n`/`N`: next/previous file
+- `}`/`{`: next/previous hunk
+- `g`/`G`: switch to git mode
+- `q`/`esc`: back to projects
 
-### `d` — diff
-- Renders `git diff` output for the current project
-- Lipgloss syntax highlighting: green added, red removed
-- `j/k` scroll, `]f/[f` jump between files
-- `s` toggles staged/unstaged
+### Git (`g`)
 
-### `g` — git
-- Compact git surface: status, stage/unstage, commit
-- `space` stage/unstage file under cursor
-- `c` open commit message input (dialog)
-- `enter` on log entry → loads that commit's diff
+- Shows branch, tracking/ahead/behind, staged/unstaged sections
+- `s` stage, `u` unstage, `d` discard (confirm prompt)
+- `c` commit prompt, `p` push
+- `enter` opens selected file diff in diff mode
 
-### `p` — projects
-- Returns to home screen / project picker
+### Opencode (`o`)
 
-### `q` — quit
+- Starts opencode subprocess handoff in selected project directory
+- Streams output into glib screen
+- `esc` / `ctrl+b` returns to projects mode
 
----
+## Theme and Layout Contracts
 
-## Footer
+- Theme source of truth is `theme.CurrentTheme()`
+- On `theme.ThemeChangedMsg`, mode surfaces update in place
+- On window resize, glib resizes app shell and embedded viewer
+- App shell is built with Bento `rooms.Focus(...)` + anchored footer
 
-Single row, always visible, always glib's.
+## Diff Integration Notes
 
-```
-o opencode   d diff   g git   p projects   q quit        DIFF
-```
-
-- Left: all keybind hints
-- Right: current mode label
-- Active view key is highlighted
-- In opencode mode, left shows `esc return` only
-
----
-
-## BentoTUI Components Used
-
-| Component | Status | Notes |
-|-----------|--------|-------|
-| `surface` | exists | full canvas renderer |
-| `input` | exists | project picker |
-| `bar` | exists | footer + topbar |
-| `dialog` | exists | commit input, help overlay |
-| `theme` | exists | inherited from BentoTUI |
-
----
-
-## Components To Build
-
-| Component | Notes |
-|-----------|-------|
-| `pty` | subprocess embed for opencode view |
-| `diffview` | git diff renderer with lipgloss highlighting |
-| `tree` | file tree, read-only, vim nav (future) |
-| `gitstrip` | stage/unstage/commit surface (future) |
-
----
-
-## Phases
-
-**Phase 1** — home screen + shell ✓  
-Home screen running with wordmark, project picker input, glib footer, key routing stubs.
-
-**Phase 2** — opencode view  
-PTY embed, footer persistence, esc to return.
-
-**Phase 3** — diff view  
-`git diff` output, lipgloss highlighting, scroll/jump.
-
-**Phase 4** — git view  
-Status, stage/unstage, commit dialog.
-
-**Phase 5** — polish  
-Recent projects from history, `glib .` flag, themes.
-
----
-
-## Repo Structure
-
-```
-glib/
-  main.go       ← home screen + key routing
-  go.mod
-  go.sum
-```
-
-Single file until phase 2 requires splitting views into separate files.
+- glib does not maintain a second diff renderer pipeline.
+- `internal/diffview` is minimal state/mock glue only.
+- Embedded viewer content is drawn directly to preserve ANSI diff colors.
+- Wrapping viewer output in ANSI-stripping containers is not allowed.
