@@ -2,48 +2,74 @@
 
 ![glib header](./header.png)
 
-Terminal workspace for project picking, git status/diff flow, and agent execution.
+`glib` is a terminal workspace app for repository-first development: authenticate once, pick a repo, inspect and stage changes, review beautiful diffs, and hand off to your coding agent without leaving one UI shell.
 
-Diff mode is powered by the embedded `bento-diffs` viewer.
+## Product Direction
 
-## Run
+- Repo-first UX: you start from GitHub repositories, not local filesystem spelunking.
+- One workspace shell: auth, project, git, diff, and agent workflows live in one full-screen TUI.
+- Best-in-class diffs: embedded `bento-diffs` renderer stays the source of truth for diff reading.
+- Portable execution: local persisted workspaces or ephemeral workspaces for sandbox/container/VPS flows.
+
+## Quick Start
 
 ```bash
 go run ./cmd/glib
 ```
 
-## Current MVP
+By default, `glib` ships with a built-in GitHub OAuth client id so release users can sign in immediately.
 
-- Projects view (`p`) with local navigation + clone from URL
-- Diff view (`d`) backed by `bento-diffs` rendering/navigation
-- Git view (`g`) with stage/unstage, commit, and log-to-diff
-- Opencode view (`o`) with embedded mode + fallback behavior
+## Auth Model (Device Flow)
 
-## Controls
+- `glib` uses GitHub Device Flow in-terminal.
+- Default scope is `repo` (supports private repositories).
+- Token is stored locally at your user config path (`<user-config-dir>/glib/github_token`).
+- Auth is embedded in the home/projects card under the wordmark.
+- `enter` starts sign-in; `l` clears local token.
 
-- `o` opencode
-- `d` diff
-- `g` git
-- `p` projects
-- `t` theme picker
-- `q` quit
+## Modes
 
-### Diff Controls
+- `PROJECTS` (`p`): GitHub repo list picker and workspace backend toggle.
+- `GIT` (`g`): staged/unstaged/untracked operations with commit/push actions.
+- `DIFF` (`d`): embedded `bento-diffs` viewer with file/hunk navigation.
+- `OPENCODE` (`o`): subprocess tunnel for agent execution in selected project directory.
 
-- `j/k` or arrows: scroll
-- `ctrl+d`/`pgdown`: half-page down
-- `ctrl+u`/`pgup`: half-page up
-- `n`/`N`: next/previous file
-- `}`/`{`: next/previous hunk
-- `g`/`G`: open git mode
-- `q`/`esc`: back to projects
+## Workspace Backends
 
-### Diff Integration Notes
+- `local`: clone/use repos under a persisted root (`GLIB_WORKSPACE_ROOT` or `~/glib-workspaces`).
+- `ephemeral`: clone repos into temporary directories per session.
+- Current behavior note: ephemeral mode is a temp-clone strategy right now, not a git worktree strategy yet.
+- Toggle backend in projects repo picker with `b`.
 
-- glib keeps its own global footer.
-- The embedded viewer footer is intentionally not shown in glib.
-- Theme and resize updates are forwarded into the embedded viewer.
+## Key Controls
 
-## Development Rules
+- global: `p` projects, `g` git, `d` diff, `o` opencode, `t` theme, `q` quit
+- projects repo picker: `j/k` move, `enter` open action chooser, `b` backend toggle, `r` refresh repos
+- projects action chooser (shown below repo card): `j/k` choose action, `enter` run, `esc` back
+- diff: `j/k` scroll, `ctrl+d`/`ctrl+u` page, `n/N` file nav, `{`/`}` hunk nav
+- git: `s` stage, `u` unstage, `d` discard, `c` commit, `p` push, `enter` open file diff
 
-- UI/layout policy: see `opencode.md`
+## Repo Selection UX
+
+- Repo list viewport is intentionally compact (5 visible rows) with keyboard scrolling.
+- Selecting a repo opens a lightweight chooser below the repo card:
+  - `Diff` opens `bento-diffs` workflow for the selected repo.
+  - `Opencode` opens opencode tunnel for the selected repo.
+
+## Environment
+
+- `GLIB_GITHUB_CLIENT_ID`: optional override for OAuth client id.
+- `GLIB_WORKSPACE_ROOT`: optional root directory for local backend clones.
+- `GLIB_ICONS`: icon mode (`safe` or nerd glyph defaults).
+
+## Architecture Notes
+
+- Unified git+diff domain internals live under `internal/bentodiffs`.
+- External diff rendering is provided by `github.com/cloudboy-jh/bento-diffs`.
+- `glib` owns the shell/footer; embedded diff viewer footer is intentionally hidden.
+
+## Internal Development Rules
+
+- UI and layout rules: `docs/opencode.md`.
+- Behavior contracts: `docs/spec.md`.
+- Product roadmap: `docs/next-steps.md`.

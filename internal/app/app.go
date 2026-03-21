@@ -1,33 +1,38 @@
 package app
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	bentodiffs "github.com/cloudboy-jh/bento-diffs/pkg/bentodiffs"
+	bdcore "github.com/cloudboy-jh/bento-diffs/pkg/bentodiffs"
 	"github.com/cloudboy-jh/bentotui/registry/bricks/badge"
-	"github.com/cloudboy-jh/bentotui/registry/bricks/bar"
 	"github.com/cloudboy-jh/bentotui/registry/bricks/card"
 	"github.com/cloudboy-jh/bentotui/registry/bricks/input"
 	selectx "github.com/cloudboy-jh/bentotui/registry/bricks/select"
 	"github.com/cloudboy-jh/bentotui/registry/bricks/surface"
 	wordmarkx "github.com/cloudboy-jh/bentotui/registry/bricks/wordmark"
+	"github.com/cloudboy-jh/bentotui/registry/recipes/vimstatus"
 	"github.com/cloudboy-jh/bentotui/registry/rooms"
 	"github.com/cloudboy-jh/bentotui/theme"
 	"github.com/cloudboy-jh/bentotui/theme/styles"
-	"glib/internal/diffview"
-	"glib/internal/gitview"
+	"glib/internal/bentodiffs"
+	"glib/internal/githubauth"
 	"glib/internal/opencode"
 	"glib/internal/projects"
+	"glib/internal/workspace"
 )
 
 const version = "v0.3.3"
-const useMockViews = true
+const useMockViews = false
+const defaultGitHubClientID = "Ov23lipqkO6lVZpjGTZJ"
+const githubAuthScope = "repo"
 
 const glibWordmark = "" +
 	"██████╗  ██╗     ██╗██████╗ \n" +
@@ -51,6 +56,7 @@ type pickerMode string
 const (
 	pickerLocal pickerMode = "LOCAL"
 	pickerClone pickerMode = "CLONE"
+	pickerRepos pickerMode = "REPOS"
 )
 
 type promptMode string
@@ -65,13 +71,13 @@ const (
 )
 
 type gitRefreshMsg struct {
-	State  gitview.State
+	State  bentodiffs.GitState
 	Action string
 	Err    error
 }
 
 type diffRefreshMsg struct {
-	Diffs        []bentodiffs.DiffResult
+	Diffs        []bdcore.DiffResult
 	Source       string
 	CommitSHA    string
 	ProjectDir   string
@@ -84,13 +90,34 @@ type cloneDoneMsg struct {
 	Err         error
 }
 
+type authBootstrapMsg struct {
+	Token string
+	Err   error
+}
+
+type authDeviceMsg struct {
+	Device githubauth.DeviceCode
+	Err    error
+}
+
+type authTokenMsg struct {
+	Token string
+	Err   error
+}
+
+type reposMsg struct {
+	Repos []githubauth.Repo
+	Err   error
+}
+
 type opencodeChunkMsg struct {
 	Data []byte
 	Err  error
 }
 
-type opencodeDoneMsg struct {
-	Err error
+type opencodeStartMsg struct {
+	State opencode.State
+	Err   error
 }
 
 type localTreeRow struct {
@@ -112,38 +139,50 @@ type iconSet struct {
 }
 
 type model struct {
-	statusBar     *bar.Model
-	inputBox      *input.Model
-	promptInput   *input.Model
-	localPicker   *selectx.Model
-	themePicker   *selectx.Model
-	width         int
-	height        int
-	inputW        int
-	mode          appMode
-	picker        pickerMode
-	projectPath   string
-	recent        []string
-	statusMessage string
-	tunnelBanner  string
-	errorText     string
-	prompt        promptMode
-	promptTitle   string
-	promptHint    string
-	pendingURL    string
-	pendingPath   string
-	git           gitview.State
-	diff          diffview.State
-	diffViewer    bentodiffs.Viewer
-	opencode      opencode.State
-	localDir      string
-	localEntries  []projects.Entry
-	localRows     []localTreeRow
-	localCursor   int
-	localScroll   int
-	localListH    int
-	localExpanded map[string]bool
-	icons         iconSet
+	footer           *vimstatus.Model
+	inputBox         *input.Model
+	promptInput      *input.Model
+	localPicker      *selectx.Model
+	themePicker      *selectx.Model
+	width            int
+	height           int
+	inputW           int
+	mode             appMode
+	picker           pickerMode
+	projectPath      string
+	recent           []string
+	statusMessage    string
+	tunnelBanner     string
+	errorText        string
+	prompt           promptMode
+	promptTitle      string
+	promptHint       string
+	pendingURL       string
+	pendingPath      string
+	git              bentodiffs.GitState
+	diff             bentodiffs.DiffState
+	diffViewer       bdcore.Viewer
+	opencode         opencode.State
+	localDir         string
+	localEntries     []projects.Entry
+	localRows        []localTreeRow
+	localCursor      int
+	localScroll      int
+	localListH       int
+	localExpanded    map[string]bool
+	icons            iconSet
+	authStatus       string
+	authClientID     string
+	authToken        string
+	authDevice       githubauth.DeviceCode
+	repos            []githubauth.Repo
+	repoCursor       int
+	repoPage         int
+	repoActionOpen   bool
+	repoActionCursor int
+	pendingLaunch    string
+	workspace        *workspace.Manager
+	workspaceKind    workspace.Kind
 }
 
 func NewModel() *model {
@@ -162,7 +201,7 @@ func NewModel() *model {
 
 	cwd, _ := os.Getwd()
 	m := &model{
-		statusBar:     bar.New(bar.FooterAnchored(), bar.CompactCards()),
+		footer:        vimstatus.New(theme.CurrentTheme()),
 		inputBox:      inp,
 		promptInput:   promptInp,
 		localPicker:   lp,
@@ -172,19 +211,28 @@ func NewModel() *model {
 		localDir:      cwd,
 		localExpanded: map[string]bool{},
 		icons:         resolveIcons(),
-		diff:          diffview.State{},
+		diff:          bentodiffs.DiffState{},
+		authStatus:    githubauth.StatusSignedOut,
+		authClientID:  resolveGitHubClientID(),
+		repoPage:      1,
+		workspaceKind: workspace.KindLocal,
+	}
+	ws, err := workspace.NewManager(workspace.KindLocal)
+	if err == nil {
+		m.workspace = ws
 	}
 	if useMockViews {
 		m.ensureDiffViewer()
-		m.diffViewer.SetDiffs(diffview.MockDiffs())
-		m.git = gitview.MockState()
+		m.diffViewer.SetDiffs(bentodiffs.MockDiffs())
+		m.git = bentodiffs.MockGitState()
 	}
 	_ = m.reloadLocalEntries()
 	return m
 }
 
 func (m *model) Init() tea.Cmd {
-	return m.inputBox.Focus()
+	m.syncFooter()
+	return tea.Batch(m.inputBox.Focus(), m.bootstrapAuthCmd())
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -196,7 +244,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.inputBox.SetSize(m.inputW-5, 1)
 		m.promptInput.SetSize(max(20, m.width/2), 1)
 		m.resizeLocalPicker()
-		m.statusBar.SetSize(m.width, 1)
+		m.footer.SetSize(m.width, 1)
 		if m.diffViewer != nil {
 			m.diffViewer.SetSize(max(20, m.width-2), max(1, m.bodyHeight()-2))
 		}
@@ -206,6 +254,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.diffViewer != nil {
 			m.diffViewer.SetTheme(theme.CurrentTheme())
 		}
+		m.footer.SetTheme(theme.CurrentTheme())
 		return m, nil
 
 	case gitRefreshMsg:
@@ -241,11 +290,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.diff.SelectedPath = msg.SelectedPath
 		return m, nil
 
-	case gitview.OpenDiffMsg:
+	case bentodiffs.OpenDiffMsg:
 		m.mode = modeDiff
 		m.ensureDiffViewer()
 		if useMockViews {
-			m.diffViewer.SetDiffs(diffview.MockDiffs())
+			m.diffViewer.SetDiffs(bentodiffs.MockDiffs())
 			return m, nil
 		}
 		if m.projectPath == "" {
@@ -255,17 +304,103 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case cloneDoneMsg:
 		if msg.Err != nil {
+			m.pendingLaunch = ""
+			m.repoActionOpen = false
 			m.showError(msg.Err.Error())
 			return m, nil
 		}
 		m.projectPath = msg.ProjectPath
 		m.addRecent(msg.ProjectPath)
-		m.statusMessage = "clone complete"
+		m.statusMessage = "repo ready"
+		launch := m.pendingLaunch
+		m.pendingLaunch = ""
+		m.repoActionOpen = false
+		switch launch {
+		case "diff":
+			m.mode = modeDiff
+			m.ensureDiffViewer()
+			if useMockViews {
+				m.diffViewer.SetDiffs(bentodiffs.MockDiffs())
+				return m, nil
+			}
+			return m, m.refreshDiffCmd("", "", "")
+		case "opencode":
+			m.mode = modeOpencode
+			m.opencode.Buffer = nil
+			return m, m.startOpencodeCmd()
+		default:
+			m.mode = modeProjects
+			return m, nil
+		}
+
+	case authBootstrapMsg:
+		if msg.Err != nil {
+			m.statusMessage = "auth bootstrap failed"
+			return m, nil
+		}
+		if msg.Token != "" {
+			m.authToken = msg.Token
+			m.authStatus = githubauth.StatusAuth
+			m.mode = modeProjects
+			m.picker = pickerRepos
+			return m, m.loadReposCmd()
+		}
+		m.authStatus = githubauth.StatusSignedOut
 		m.mode = modeProjects
+		return m, nil
+
+	case authDeviceMsg:
+		if msg.Err != nil {
+			m.showError(msg.Err.Error())
+			m.authStatus = githubauth.StatusSignedOut
+			return m, nil
+		}
+		m.authStatus = githubauth.StatusPending
+		m.authDevice = msg.Device
+		m.statusMessage = "approve device code in browser"
+		return m, m.pollAuthCmd(msg.Device)
+
+	case authTokenMsg:
+		if msg.Err != nil {
+			m.authStatus = githubauth.StatusExpired
+			m.showError(msg.Err.Error())
+			return m, nil
+		}
+		m.authToken = msg.Token
+		m.authStatus = githubauth.StatusAuth
+		m.mode = modeProjects
+		m.picker = pickerRepos
+		m.statusMessage = "github auth complete"
+		return m, tea.Batch(m.persistTokenCmd(msg.Token), m.loadReposCmd())
+
+	case reposMsg:
+		if msg.Err != nil {
+			m.showError(msg.Err.Error())
+			return m, nil
+		}
+		sort.Slice(msg.Repos, func(i, j int) bool {
+			return strings.ToLower(msg.Repos[i].FullName) < strings.ToLower(msg.Repos[j].FullName)
+		})
+		m.repos = msg.Repos
+		if len(m.repos) == 0 {
+			m.repoCursor = 0
+		} else {
+			m.repoCursor = clamp(m.repoCursor, 0, len(m.repos)-1)
+		}
+		m.repoActionOpen = false
+		m.repoActionCursor = 0
+		m.picker = pickerRepos
 		return m, nil
 
 	case opencodeChunkMsg:
 		if msg.Err != nil {
+			if errors.Is(msg.Err, io.EOF) {
+				m.stopOpencode()
+				m.tunnelBanner = "opencode -> glib tunnel closed"
+				m.statusMessage = "returned from opencode"
+				m.mode = modeProjects
+				return m, nil
+			}
 			m.stopOpencode()
 			m.showError("opencode stream closed")
 			m.mode = modeProjects
@@ -280,15 +415,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case opencodeDoneMsg:
+	case opencodeStartMsg:
 		if msg.Err != nil {
-			m.tunnelBanner = "opencode -> glib tunnel error"
-			m.showError("opencode failed: " + msg.Err.Error())
+			m.mode = modeProjects
+			m.showError("opencode failed to start: " + msg.Err.Error())
 			return m, nil
 		}
-		m.tunnelBanner = "opencode -> glib tunnel closed | back in glib"
-		m.statusMessage = "returned from opencode"
-		return m, nil
+		m.opencode = msg.State
+		m.tunnelBanner = "glib -> opencode tunnel open"
+		return m, m.readOpencodeChunkCmd()
 
 	case tea.KeyMsg:
 		if m.tunnelBanner != "" && msg.String() != "o" {
@@ -308,11 +443,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 		case "tab":
-			if m.mode == modeProjects {
+			if m.mode == modeProjects && m.authStatus == githubauth.StatusAuth {
 				if m.picker == pickerLocal {
 					m.picker = pickerClone
 					m.inputBox.SetPlaceholder("Paste git URL (https/ssh)…")
-				} else {
+				} else if m.picker == pickerClone {
 					m.picker = pickerLocal
 					m.inputBox.SetPlaceholder("Search or open a project…")
 					_ = m.reloadLocalEntries()
@@ -324,12 +459,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.openPrompt(promptTheme, "Theme", "j/k move, enter apply, esc cancel", "")
 			return m, nil
 		case "o":
+			if m.mode == modeOpencode {
+				return m, nil
+			}
+			m.mode = modeOpencode
+			m.opencode.Buffer = nil
 			return m, m.startOpencodeCmd()
 		case "D":
 			m.mode = modeDiff
 			m.ensureDiffViewer()
 			if useMockViews {
-				m.diffViewer.SetDiffs(diffview.MockDiffs())
+				m.diffViewer.SetDiffs(bentodiffs.MockDiffs())
 				return m, nil
 			}
 			if m.projectPath == "" {
@@ -339,7 +479,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "G":
 			m.mode = modeGit
 			if useMockViews {
-				m.git = gitview.MockState()
+				m.git = bentodiffs.MockGitState()
 				return m, nil
 			}
 			return m, m.refreshGitCmd()
@@ -350,7 +490,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mode = modeDiff
 			m.ensureDiffViewer()
 			if useMockViews {
-				m.diffViewer.SetDiffs(diffview.MockDiffs())
+				m.diffViewer.SetDiffs(bentodiffs.MockDiffs())
 				return m, nil
 			}
 			if m.projectPath == "" {
@@ -363,7 +503,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.mode = modeGit
 			if useMockViews {
-				m.git = gitview.MockState()
+				m.git = bentodiffs.MockGitState()
 				return m, nil
 			}
 			return m, m.refreshGitCmd()
@@ -387,6 +527,83 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.mode == modeProjects {
+			if m.authStatus != githubauth.StatusAuth {
+				switch msg.String() {
+				case "enter":
+					return m, m.startAuthCmd()
+				case "l":
+					m.authToken = ""
+					m.authStatus = githubauth.StatusSignedOut
+					m.authDevice = githubauth.DeviceCode{}
+					m.repos = nil
+					m.picker = pickerLocal
+					return m, m.clearTokenCmd()
+				case "r":
+					return m, m.startAuthCmd()
+				}
+				return m, nil
+			}
+
+			if m.picker == pickerRepos {
+				if m.repoActionOpen {
+					switch msg.String() {
+					case "j", "down":
+						m.repoActionCursor = clamp(m.repoActionCursor+1, 0, 1)
+						return m, nil
+					case "k", "up":
+						m.repoActionCursor = clamp(m.repoActionCursor-1, 0, 1)
+						return m, nil
+					case "esc":
+						m.repoActionOpen = false
+						return m, nil
+					case "enter":
+						repo, ok := m.selectedRepo()
+						if !ok {
+							return m, nil
+						}
+						if m.repoActionCursor == 0 {
+							m.pendingLaunch = "diff"
+							m.statusMessage = "opening diff for " + repo.FullName
+						} else {
+							m.pendingLaunch = "opencode"
+							m.statusMessage = "opening opencode for " + repo.FullName
+						}
+						return m, m.openRepoCmd(repo)
+					}
+					return m, nil
+				}
+
+				switch msg.String() {
+				case "j", "down":
+					m.repoCursor = clamp(m.repoCursor+1, 0, max(0, len(m.repos)-1))
+					return m, nil
+				case "k", "up":
+					m.repoCursor = clamp(m.repoCursor-1, 0, max(0, len(m.repos)-1))
+					return m, nil
+				case "r":
+					return m, m.loadReposCmd()
+				case "b":
+					if m.workspaceKind == workspace.KindLocal {
+						m.workspaceKind = workspace.KindEphemeral
+					} else {
+						m.workspaceKind = workspace.KindLocal
+					}
+					if m.workspace != nil {
+						m.workspace.SetKind(m.workspaceKind)
+					}
+					m.statusMessage = "backend: " + string(m.workspaceKind)
+					return m, nil
+				case "enter":
+					if len(m.repos) == 0 {
+						return m, nil
+					}
+					m.repoActionOpen = true
+					m.repoActionCursor = 0
+					return m, nil
+				}
+				return m, nil
+			}
+
 			switch msg.String() {
 			case "backspace":
 				if m.picker == pickerLocal {
@@ -495,7 +712,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "g", "G":
 				m.mode = modeGit
 				if useMockViews {
-					m.git = gitview.MockState()
+					m.git = bentodiffs.MockGitState()
 					return m, nil
 				}
 				return m, m.refreshGitCmd()
@@ -551,7 +768,7 @@ func (m *model) View() tea.View {
 
 	dim := lipgloss.NewStyle().Foreground(t.TextMuted())
 	bright := lipgloss.NewStyle().Foreground(t.Text())
-	m.syncStatusBar()
+	m.syncFooter()
 
 	body := rooms.RenderFunc(func(width, height int) string {
 		bodySurf := surface.New(width, height)
@@ -569,7 +786,7 @@ func (m *model) View() tea.View {
 		return bodySurf.Render()
 	})
 
-	screen := rooms.Focus(m.width, m.height, body, m.statusBar)
+	screen := rooms.Focus(m.width, m.height, body, m.footer)
 	surf := surface.New(m.width, m.height)
 	surf.Fill(canvasColor)
 	surf.Draw(0, 0, screen)
@@ -585,6 +802,11 @@ func (m *model) View() tea.View {
 }
 
 func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme, dim, bright lipgloss.Style) {
+	if m.authStatus == githubauth.StatusAuth && m.picker == pickerRepos {
+		m.drawRepoProjectsView(surf, bodyH, t, dim, bright)
+		return
+	}
+
 	const (
 		logoToCardGap = 1
 		cardToHelpGap = 1
@@ -603,9 +825,44 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 
 	header := lipgloss.NewStyle().Foreground(t.TextAccent()).Bold(true).Render(m.icons.Projects + "  Projects")
 	modeTag := string(m.picker)
+	if m.authStatus != githubauth.StatusAuth {
+		modeTag = "SIGN IN"
+	}
 
 	body := ""
-	if m.picker == pickerClone {
+	if m.authStatus != githubauth.StatusAuth {
+		statusText := strings.ToLower(strings.ReplaceAll(m.authStatus, "_", " "))
+		statusStyle := lipgloss.NewStyle().Foreground(t.TextMuted())
+		if m.authStatus == githubauth.StatusPending {
+			statusStyle = statusStyle.Foreground(t.Warning())
+		}
+		if m.authStatus == githubauth.StatusExpired {
+			statusStyle = statusStyle.Foreground(t.Error())
+		}
+
+		headline := lipgloss.NewStyle().Foreground(t.TextMuted()).Render("repo access")
+		statusLine := lipgloss.NewStyle().Bold(true).Foreground(t.Text()).Render("status: ") + statusStyle.Render(statusText)
+
+		buttonLabel := "Sign in with GitHub (enter)"
+		if m.authStatus == githubauth.StatusPending {
+			buttonLabel = "Waiting for approval in browser"
+		}
+		button := lipgloss.NewStyle().
+			Width(contentW).
+			Align(lipgloss.Center).
+			Background(t.BackgroundInteractive()).
+			Foreground(t.TextInverse()).
+			Bold(true).
+			Render(buttonLabel)
+
+		lines := []string{fitLine(headline, contentW), fitLine(statusLine, contentW), "", button}
+		if m.authStatus == githubauth.StatusPending {
+			codeLine := lipgloss.NewStyle().Foreground(t.Warning()).Render("Code: " + m.authDevice.UserCode)
+			urlLine := lipgloss.NewStyle().Foreground(t.TextMuted()).Render("Open: " + m.authDevice.VerificationURI)
+			lines = append(lines, "", fitLine(codeLine, contentW), fitLine(urlLine, contentW))
+		}
+		body = lipgloss.JoinVertical(lipgloss.Left, lines...)
+	} else if m.picker == pickerClone {
 		inputVal := strings.TrimSpace(m.inputBox.Value())
 		if inputVal == "" {
 			inputVal = "Paste git URL (https/ssh)..."
@@ -667,7 +924,11 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 	blockH := lipgloss.Height(block)
 
 	kbdStr := ""
-	if m.picker == pickerClone {
+	if m.authStatus != githubauth.StatusAuth {
+		kbdStr = dim.Render("sign in ") + bright.Render("enter") +
+			dim.Render("   retry ") + bright.Render("r") +
+			dim.Render("   clear token ") + bright.Render("l")
+	} else if m.picker == pickerClone {
 		kbdStr = dim.Render("toggle picker ") + bright.Render("tab") +
 			dim.Render("   submit ") + bright.Render("enter")
 	} else {
@@ -714,6 +975,93 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 		y += 1 + statusGap
 		surf.Draw(max(0, (m.width-statusW)/2), y, lipgloss.NewStyle().Foreground(t.TextMuted()).Render(status))
 	}
+}
+
+func (m *model) drawRepoProjectsView(surf *surface.Surface, bodyH int, t theme.Theme, dim, bright lipgloss.Style) {
+	contentW := m.projectsContentWidth()
+	lines := make([]string, 0, 5)
+	if len(m.repos) == 0 {
+		lines = append(lines, lipgloss.NewStyle().Foreground(t.TextMuted()).Render("No repositories loaded. Press r to refresh."))
+	} else {
+		listH := 5
+		start := windowStart(m.repoCursor, listH, len(m.repos))
+		end := min(len(m.repos), start+listH)
+		base := lipgloss.NewStyle().Width(contentW).Background(t.BackgroundPanel()).Foreground(t.Text())
+		active := base.Copy().Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Bold(true)
+		for i := start; i < end; i++ {
+			prefix := "  "
+			marker := "  "
+			style := base
+			if i == m.repoCursor {
+				prefix = "> "
+				style = active
+			}
+			if i == start && start > 0 {
+				marker = "^ "
+			} else if i == end-1 && end < len(m.repos) {
+				marker = "v "
+			}
+			name := m.repos[i].FullName
+			if m.repos[i].Private {
+				name += " (private)"
+			}
+			lines = append(lines, style.Render(fitLine(marker+prefix+name, contentW)))
+		}
+		for len(lines) < listH {
+			lines = append(lines, base.Render(""))
+		}
+	}
+
+	header := lipgloss.NewStyle().Foreground(t.TextAccent()).Bold(true).Render(m.icons.Projects + "  Repositories")
+	meta := lipgloss.NewStyle().Foreground(t.TextMuted()).Render("backend: " + string(m.workspaceKind))
+	content := lipgloss.JoinVertical(lipgloss.Left, header, meta, "", strings.Join(lines, "\n"))
+	block := lipgloss.NewStyle().
+		Background(t.BackgroundPanel()).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.BorderFocus()).
+		Padding(0, 1).
+		Width(contentW).
+		Render(content)
+	blockW := lipgloss.Width(block)
+	blockH := lipgloss.Height(block)
+	x := max(0, (m.width-blockW)/2)
+	y := max(0, (bodyH-blockH)/2)
+	surf.Draw(x, y, block)
+
+	actionKbd := dim.Render("move ") + bright.Render("j/k") + dim.Render("  actions ") + bright.Render("enter") + dim.Render("  backend ") + bright.Render("b") + dim.Render("  refresh ") + bright.Render("r")
+	if m.repoActionOpen {
+		actionRows := []string{
+			fmt.Sprintf("  %s Diff", m.icons.Diff),
+			fmt.Sprintf("  %s Opencode", m.icons.Opencode),
+		}
+		base := lipgloss.NewStyle().Width(contentW).Background(t.BackgroundPanel()).Foreground(t.Text())
+		active := base.Copy().Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Bold(true)
+		for i := range actionRows {
+			if i == m.repoActionCursor {
+				actionRows[i] = active.Render(fitLine(actionRows[i], contentW))
+			} else {
+				actionRows[i] = base.Render(fitLine(actionRows[i], contentW))
+			}
+		}
+		actionTitle := "Run on selected repo"
+		actionBody := lipgloss.JoinVertical(lipgloss.Left,
+			lipgloss.NewStyle().Foreground(t.TextMuted()).Render(actionTitle),
+			"",
+			lipgloss.JoinVertical(lipgloss.Left, actionRows...),
+		)
+		actionBlock := lipgloss.NewStyle().
+			Background(t.BackgroundPanel()).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(t.BorderFocus()).
+			Padding(0, 1).
+			Width(contentW).
+			Render(actionBody)
+		surf.Draw(x, y+blockH+1, actionBlock)
+		actionKbd = dim.Render("choose ") + bright.Render("j/k") + dim.Render("  run ") + bright.Render("enter") + dim.Render("  back ") + bright.Render("esc")
+		surf.Draw(max(0, (m.width-lipgloss.Width(actionKbd))/2), y+blockH+lipgloss.Height(actionBlock)+2, actionKbd)
+		return
+	}
+	surf.Draw(max(0, (m.width-lipgloss.Width(actionKbd))/2), y+blockH+1, actionKbd)
 }
 
 func (m *model) drawDiffView(surf *surface.Surface, bodyW, bodyH int, t theme.Theme) {
@@ -771,7 +1119,7 @@ func (m *model) drawGitView(surf *surface.Surface, bodyW, bodyH int, t theme.The
 	last := ""
 	if m.git.LastCommit.Hash != "" {
 		last = lipgloss.NewStyle().Foreground(t.Info()).Render(m.git.LastCommit.Hash) +
-			"  " + m.git.LastCommit.Message + "  " + lipgloss.NewStyle().Foreground(t.TextMuted()).Render("· "+gitview.RelativeTime(m.git.LastCommit.Time))
+			"  " + m.git.LastCommit.Message + "  " + lipgloss.NewStyle().Foreground(t.TextMuted()).Render("· "+bentodiffs.RelativeTime(m.git.LastCommit.Time))
 	}
 
 	leftPane := rooms.RenderFunc(func(w, h int) string {
@@ -827,7 +1175,7 @@ func (m *model) drawGitView(surf *surface.Surface, bodyW, bodyH int, t theme.The
 		p := card.New(
 			card.Title(fmt.Sprintf("%s  %s", viewString(wm.View()), viewString(tag.View()))),
 			card.Content(content),
-			card.Flat(),
+			card.Raised(),
 		)
 		p.SetSize(w, h)
 		return viewString(p.View())
@@ -878,8 +1226,7 @@ func (m *model) drawGitView(surf *surface.Surface, bodyW, bodyH int, t theme.The
 		return viewString(p.View())
 	})
 
-	drawerW := clamp(bodyW/3, 34, 56)
-	split := rooms.DrawerRight(bodyW, bodyH, drawerW, leftPane, rightPane)
+	split := rooms.HSplit(bodyW, bodyH, leftPane, rightPane)
 	surf.Draw(0, 0, split)
 }
 
@@ -890,11 +1237,14 @@ func (m *model) drawOpencodeView(surf *surface.Surface, bodyH int, t theme.Theme
 	tag.SetVariant(badge.VariantInfo)
 	tag.SetBold(true)
 
-	contentW := max(8, m.width-2)
-	contentH := max(1, bodyH-2)
+	contentW := max(8, m.width-6)
+	contentH := max(1, bodyH-4)
 	lines := []string{}
 	if !m.opencode.Running {
-		lines = append(lines, lipgloss.NewStyle().Foreground(t.TextMuted()).Render("opencode is not running."))
+		lines = append(lines,
+			lipgloss.NewStyle().Foreground(t.TextMuted()).Render("starting opencode tunnel..."),
+			lipgloss.NewStyle().Foreground(t.TextMuted()).Render("esc / ctrl+b returns to projects"),
+		)
 	} else {
 		raw := strings.Split(strings.ReplaceAll(string(m.opencode.Buffer), "\r", ""), "\n")
 		if len(raw) > contentH {
@@ -909,70 +1259,96 @@ func (m *model) drawOpencodeView(surf *surface.Surface, bodyH int, t theme.Theme
 	p := card.New(
 		card.Title(fmt.Sprintf("%s  %s", viewString(wm.View()), viewString(tag.View()))),
 		card.Content(content),
-		card.Flat(),
+		card.Raised(),
 	)
-	p.SetSize(m.width, bodyH)
-	surf.Draw(0, 0, viewString(p.View()))
+	p.SetSize(max(1, m.width-2), max(1, bodyH-1))
+	ring := lipgloss.NewStyle().
+		Width(max(1, m.width)).
+		Height(max(1, bodyH)).
+		Padding(0, 1).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.BorderFocus()).
+		Render(viewString(p.View()))
+	surf.Draw(0, 0, ring)
 }
 
-func (m *model) syncStatusBar() {
-	m.statusBar.SetRole(bar.RoleFooter)
-	m.statusBar.SetFooterMode(bar.FooterModeAnchored)
-	m.statusBar.SetCompactCards(true)
+func (m *model) syncFooter() {
+	cfg := vimstatus.Config{
+		Mode:      m.footerModeLabel(),
+		Branch:    "glib",
+		Context:   "",
+		ShowClock: true,
+	}
 
-	right := fmt.Sprintf("%s · glib %s", m.mode, version)
-	left := "~ glib"
-	cards := []bar.Card{}
+	if m.projectPath != "" {
+		cfg.Branch = filepath.Base(m.projectPath)
+	}
 
 	switch m.mode {
 	case modeProjects:
-		left = m.icons.Projects + " projects"
-		cards = []bar.Card{
-			{Command: "o", Label: m.icons.Opencode + " opencode", Variant: bar.CardPrimary, Enabled: true, Priority: 7},
-			{Command: "d", Label: m.icons.Diff + " diff", Variant: bar.CardNormal, Enabled: true, Priority: 6},
-			{Command: "g", Label: m.icons.Git + " git", Variant: bar.CardNormal, Enabled: true, Priority: 5},
-			{Command: "p", Label: m.icons.Projects + " projects", Variant: bar.CardNormal, Enabled: true, Priority: 4},
-			{Command: "tab", Label: "picker", Variant: bar.CardMuted, Enabled: true, Priority: 3},
-			{Command: "q", Label: m.icons.Quit + " quit", Variant: bar.CardMuted, Enabled: true, Priority: 2},
+		if m.authStatus != githubauth.StatusAuth {
+			cfg.Context = m.icons.Projects + " enter sign in  r retry  " + m.icons.Quit + " q quit"
+			cfg.Scroll = strings.ToLower(m.authStatus)
+		} else if m.picker == pickerRepos {
+			if m.repoActionOpen {
+				cfg.Context = m.icons.Projects + " j/k choose  enter run  esc back"
+			} else {
+				cfg.Context = m.icons.Projects + " j/k move  enter actions  b backend  r refresh"
+			}
+			if len(m.repos) > 0 {
+				cfg.Position = fmt.Sprintf("%d/%d", min(len(m.repos), m.repoCursor+1), len(m.repos))
+			}
+			cfg.Scroll = string(m.workspaceKind)
+		} else {
+			cfg.Context = m.icons.Projects + " p projects  " + m.icons.Clone + " tab picker  " + m.icons.Quit + " q quit"
+			if len(m.localRows) > 0 {
+				cfg.Position = fmt.Sprintf("%d/%d", min(len(m.localRows), m.localCursor+1), len(m.localRows))
+			}
 		}
 	case modeDiff:
-		left = m.icons.Diff + " diff"
-		cards = []bar.Card{
-			{Command: "j/k", Label: "scroll", Variant: bar.CardNormal, Enabled: true, Priority: 6},
-			{Command: "{ }", Label: "hunk", Variant: bar.CardNormal, Enabled: true, Priority: 5},
-			{Command: "n/N", Label: "file", Variant: bar.CardNormal, Enabled: true, Priority: 4},
-			{Command: "g/G", Label: m.icons.Git + " git", Variant: bar.CardPrimary, Enabled: true, Priority: 3},
-			{Command: "q", Label: m.icons.Projects + " back", Variant: bar.CardMuted, Enabled: true, Priority: 2},
+		cfg.Context = m.icons.Diff + " j/k scroll  n/N file  { } hunk  " + m.icons.Git + " g git"
+		if m.diffViewer != nil {
+			st := m.diffViewer.State()
+			cfg.Position = fmt.Sprintf("%d/%d", st.Scroll+1, st.MaxScroll+1)
+			cfg.Scroll = fmt.Sprintf("file %d/%d", st.ActiveFile+1, max(1, st.FileCount))
 		}
 	case modeGit:
-		left = m.icons.Git + " git"
-		cards = []bar.Card{
-			{Command: "j/k", Label: "move", Variant: bar.CardNormal, Enabled: true, Priority: 9},
-			{Command: "enter", Label: m.icons.Diff + " open", Variant: bar.CardNormal, Enabled: true, Priority: 8},
-			{Command: "s/u", Label: "stage", Variant: bar.CardNormal, Enabled: true, Priority: 7},
-			{Command: "d", Label: "discard", Variant: bar.CardDanger, Enabled: true, Priority: 6},
-			{Command: "c", Label: "commit", Variant: bar.CardNormal, Enabled: true, Priority: 5},
-			{Command: "p", Label: "push", Variant: bar.CardNormal, Enabled: true, Priority: 4},
-			{Command: "D", Label: m.icons.Diff + " diff", Variant: bar.CardPrimary, Enabled: true, Priority: 3},
-			{Command: "q", Label: m.icons.Projects + " back", Variant: bar.CardMuted, Enabled: true, Priority: 2},
+		cfg.Context = m.icons.Git + " s stage  u unstage  c commit  d discard  enter diff"
+		rows := m.git.Rows()
+		if len(rows) > 0 {
+			cfg.Position = fmt.Sprintf("%d/%d", min(len(rows), m.git.Cursor+1), len(rows))
 		}
+		cfg.Scroll = fmt.Sprintf("+%d -%d", m.git.AddedTotal, m.git.DeletedTotal)
 	case modeOpencode:
-		left = m.icons.Opencode + " opencode"
-		cards = []bar.Card{
-			{Command: "esc", Label: m.icons.Projects + " return", Variant: bar.CardPrimary, Enabled: true, Priority: 4},
-			{Command: "t", Label: "theme", Variant: bar.CardMuted, Enabled: true, Priority: 3},
-			{Command: "q", Label: m.icons.Quit + " quit", Variant: bar.CardMuted, Enabled: true, Priority: 2},
+		cfg.Context = m.icons.Opencode + " tunneled  esc/ctrl+b return"
+		if m.opencode.Running {
+			cfg.Scroll = "live"
+		} else {
+			cfg.Scroll = "starting"
 		}
 	}
 
 	if m.tunnelBanner != "" {
-		left = m.tunnelBanner
-		cards = nil
+		cfg.Context = m.tunnelBanner
 	}
 
-	m.statusBar.SetLeft(left)
-	m.statusBar.SetCards(cards)
-	m.statusBar.SetRight(right)
+	m.footer.SetTheme(theme.CurrentTheme())
+	m.footer.SetConfig(cfg)
+}
+
+func (m *model) footerModeLabel() string {
+	switch m.mode {
+	case modeProjects:
+		return m.icons.Projects + " " + string(m.mode)
+	case modeDiff:
+		return m.icons.Diff + " " + string(m.mode)
+	case modeGit:
+		return m.icons.Git + " " + string(m.mode)
+	case modeOpencode:
+		return m.icons.Opencode + " " + string(m.mode)
+	default:
+		return string(m.mode)
+	}
 }
 
 func (m *model) updatePrompt(msg tea.KeyMsg) tea.Cmd {
@@ -1170,7 +1546,7 @@ func (m *model) activateLocalSelection() {
 			_ = m.reloadLocalEntries()
 			return
 		}
-		if gitview.IsGitRepo(row.Path) {
+		if bentodiffs.IsGitRepo(row.Path) {
 			m.projectPath = row.Path
 			m.addRecent(row.Path)
 			m.statusMessage = "project selected"
@@ -1180,7 +1556,7 @@ func (m *model) activateLocalSelection() {
 		m.rebuildLocalTree()
 		return
 	}
-	if gitview.IsGitRepo(m.localDir) {
+	if bentodiffs.IsGitRepo(m.localDir) {
 		m.projectPath = m.localDir
 		m.addRecent(m.localDir)
 		m.statusMessage = "project selected"
@@ -1285,40 +1661,32 @@ func resolveIcons() iconSet {
 		Prompt:   "[>]",
 	}
 	nerd := iconSet{
-		Projects: "\uf07c",
-		Clone:    "\uf09b",
-		Root:     "\ue5ff",
-		Dot:      "\uf111",
-		Opencode: "\ueea7",
-		Diff:     "\uf044",
-		Git:      "\ue702",
-		Quit:     "\uf00d",
-		Prompt:   "\uf120",
+		Projects: "\uea83", // nf-cod-folder
+		Clone:    "\ueb3e", // nf-cod-repo_clone
+		Root:     "\ueb46", // nf-cod-root_folder
+		Dot:      "\uea71", // nf-cod-circle_filled
+		Opencode: "\uea85", // nf-cod-terminal
+		Diff:     "\ueae1", // nf-cod-diff
+		Git:      "\uea68", // nf-cod-source_control
+		Quit:     "\uea76", // nf-cod-close
+		Prompt:   "\ueab6", // nf-cod-chevron_right
 	}
 
 	switch mode {
-	case "nerd":
-		return nerd
 	case "safe":
 		return safe
-	case "auto", "":
-		if shouldUseNerdIconsAuto() {
-			return nerd
-		}
-		return safe
+	case "nerd", "auto", "", "unicode", "utf", "utf8":
+		return nerd
 	default:
-		return safe
+		return nerd
 	}
 }
 
-func shouldUseNerdIconsAuto() bool {
-	if v := os.Getenv("GLIB_NERD_ICONS"); v == "1" || strings.EqualFold(v, "true") {
-		return true
+func resolveGitHubClientID() string {
+	if v := strings.TrimSpace(os.Getenv("GLIB_GITHUB_CLIENT_ID")); v != "" {
+		return v
 	}
-	if v := os.Getenv("NERD_FONT"); v == "1" || strings.EqualFold(v, "true") {
-		return true
-	}
-	return false
+	return defaultGitHubClientID
 }
 
 func buildTreeRows(entries []projects.Entry, prefix string, expanded map[string]bool) []localTreeRow {
@@ -1411,10 +1779,89 @@ func truncateText(text string, maxWidth int) string {
 	return styles.ClipANSI(text, maxWidth)
 }
 
+func (m *model) bootstrapAuthCmd() tea.Cmd {
+	return func() tea.Msg {
+		tok, err := githubauth.LoadToken()
+		return authBootstrapMsg{Token: tok, Err: err}
+	}
+}
+
+func (m *model) startAuthCmd() tea.Cmd {
+	if strings.TrimSpace(m.authClientID) == "" {
+		m.showError("missing GitHub client id")
+		return nil
+	}
+	return func() tea.Msg {
+		device, err := githubauth.StartDeviceFlow(m.authClientID, githubAuthScope)
+		return authDeviceMsg{Device: device, Err: err}
+	}
+}
+
+func (m *model) pollAuthCmd(device githubauth.DeviceCode) tea.Cmd {
+	return func() tea.Msg {
+		tok, err := githubauth.PollAccessToken(m.authClientID, device.DeviceCode, device.Interval)
+		return authTokenMsg{Token: tok, Err: err}
+	}
+}
+
+func (m *model) persistTokenCmd(token string) tea.Cmd {
+	return func() tea.Msg {
+		if err := githubauth.SaveToken(token); err != nil {
+			return authTokenMsg{Err: err}
+		}
+		return nil
+	}
+}
+
+func (m *model) clearTokenCmd() tea.Cmd {
+	return func() tea.Msg {
+		if err := githubauth.ClearToken(); err != nil {
+			return authBootstrapMsg{Err: err}
+		}
+		return nil
+	}
+}
+
+func (m *model) loadReposCmd() tea.Cmd {
+	if strings.TrimSpace(m.authToken) == "" {
+		return nil
+	}
+	page := m.repoPage
+	if page < 1 {
+		page = 1
+	}
+	return func() tea.Msg {
+		repos, err := githubauth.ListRepos(m.authToken, page, 100)
+		return reposMsg{Repos: repos, Err: err}
+	}
+}
+
+func (m *model) selectedRepo() (githubauth.Repo, bool) {
+	if len(m.repos) == 0 {
+		return githubauth.Repo{}, false
+	}
+	idx := clamp(m.repoCursor, 0, len(m.repos)-1)
+	return m.repos[idx], true
+}
+
+func (m *model) openRepoCmd(repo githubauth.Repo) tea.Cmd {
+	if m.workspace == nil {
+		m.showError("workspace manager unavailable")
+		return nil
+	}
+	return func() tea.Msg {
+		path, err := m.workspace.EnsureRepo(repo.FullName, repo.CloneURL)
+		if err != nil {
+			return cloneDoneMsg{Err: err}
+		}
+		return cloneDoneMsg{ProjectPath: path}
+	}
+}
+
 func (m *model) refreshGitCmd() tea.Cmd {
 	if useMockViews {
 		return func() tea.Msg {
-			state := gitview.MockState()
+			state := bentodiffs.MockGitState()
 			state.Cursor = m.git.Cursor
 			return gitRefreshMsg{State: state}
 		}
@@ -1424,10 +1871,10 @@ func (m *model) refreshGitCmd() tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		if !gitview.IsGitRepo(m.projectPath) {
+		if !bentodiffs.IsGitRepo(m.projectPath) {
 			return gitRefreshMsg{Err: fmt.Errorf("not a git repo: %s", m.projectPath)}
 		}
-		state, err := gitview.Refresh(m.projectPath)
+		state, err := bentodiffs.Refresh(m.projectPath)
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
@@ -1439,7 +1886,7 @@ func (m *model) refreshGitCmd() tea.Cmd {
 func (m *model) refreshDiffCmd(source, commitSHA, selectedPath string) tea.Cmd {
 	if useMockViews {
 		return func() tea.Msg {
-			return diffRefreshMsg{Diffs: diffview.MockDiffs(), Source: "mock", SelectedPath: selectedPath}
+			return diffRefreshMsg{Diffs: bentodiffs.MockDiffs(), Source: "mock", SelectedPath: selectedPath}
 		}
 	}
 	if m.projectPath == "" {
@@ -1451,7 +1898,7 @@ func (m *model) refreshDiffCmd(source, commitSHA, selectedPath string) tea.Cmd {
 	}
 
 	return func() tea.Msg {
-		if !gitview.IsGitRepo(m.projectPath) {
+		if !bentodiffs.IsGitRepo(m.projectPath) {
 			return diffRefreshMsg{Err: fmt.Errorf("not a git repo: %s", m.projectPath)}
 		}
 		var out string
@@ -1469,12 +1916,12 @@ func (m *model) refreshDiffCmd(source, commitSHA, selectedPath string) tea.Cmd {
 			args = append(args, "--", selectedPath)
 		}
 		if err == nil {
-			out, _, err = gitview.RunGit(m.projectPath, args...)
+			out, _, err = bentodiffs.RunGit(m.projectPath, args...)
 		}
 		if err != nil {
 			return diffRefreshMsg{Err: err}
 		}
-		diffs, parseErr := bentodiffs.ParseUnifiedDiffs(out)
+		diffs, parseErr := bdcore.ParseUnifiedDiffs(out)
 		if parseErr != nil {
 			return diffRefreshMsg{Err: parseErr}
 		}
@@ -1491,7 +1938,7 @@ func (m *model) refreshDiffCmd(source, commitSHA, selectedPath string) tea.Cmd {
 func (m *model) stageFileCmd() tea.Cmd {
 	if useMockViews {
 		return func() tea.Msg {
-			state := gitview.MockState()
+			state := bentodiffs.MockGitState()
 			state.Cursor = m.git.Cursor
 			return gitRefreshMsg{State: state, Action: "mock: staged file"}
 		}
@@ -1501,10 +1948,10 @@ func (m *model) stageFileCmd() tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		if err := gitview.StageFile(m.projectPath, f.Path); err != nil {
+		if err := bentodiffs.StageFile(m.projectPath, f.Path); err != nil {
 			return gitRefreshMsg{Err: err}
 		}
-		state, err := gitview.Refresh(m.projectPath)
+		state, err := bentodiffs.Refresh(m.projectPath)
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
@@ -1515,7 +1962,7 @@ func (m *model) stageFileCmd() tea.Cmd {
 func (m *model) unstageFileCmd() tea.Cmd {
 	if useMockViews {
 		return func() tea.Msg {
-			state := gitview.MockState()
+			state := bentodiffs.MockGitState()
 			state.Cursor = m.git.Cursor
 			return gitRefreshMsg{State: state, Action: "mock: unstaged file"}
 		}
@@ -1525,10 +1972,10 @@ func (m *model) unstageFileCmd() tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		if err := gitview.UnstageFile(m.projectPath, f.Path); err != nil {
+		if err := bentodiffs.UnstageFile(m.projectPath, f.Path); err != nil {
 			return gitRefreshMsg{Err: err}
 		}
-		state, err := gitview.Refresh(m.projectPath)
+		state, err := bentodiffs.Refresh(m.projectPath)
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
@@ -1539,16 +1986,16 @@ func (m *model) unstageFileCmd() tea.Cmd {
 func (m *model) discardFileCmd(path string) tea.Cmd {
 	if useMockViews {
 		return func() tea.Msg {
-			state := gitview.MockState()
+			state := bentodiffs.MockGitState()
 			state.Cursor = m.git.Cursor
 			return gitRefreshMsg{State: state, Action: "mock: discarded " + path}
 		}
 	}
 	return func() tea.Msg {
-		if err := gitview.DiscardFile(m.projectPath, path); err != nil {
+		if err := bentodiffs.DiscardFile(m.projectPath, path); err != nil {
 			return gitRefreshMsg{Err: err}
 		}
-		state, err := gitview.Refresh(m.projectPath)
+		state, err := bentodiffs.Refresh(m.projectPath)
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
@@ -1559,16 +2006,16 @@ func (m *model) discardFileCmd(path string) tea.Cmd {
 func (m *model) commitCmd(message string) tea.Cmd {
 	if useMockViews {
 		return func() tea.Msg {
-			state := gitview.MockState()
+			state := bentodiffs.MockGitState()
 			state.Cursor = m.git.Cursor
 			return gitRefreshMsg{State: state, Action: "mock: commit created"}
 		}
 	}
 	return func() tea.Msg {
-		if err := gitview.Commit(m.projectPath, message); err != nil {
+		if err := bentodiffs.Commit(m.projectPath, message); err != nil {
 			return gitRefreshMsg{Err: err}
 		}
-		state, err := gitview.Refresh(m.projectPath)
+		state, err := bentodiffs.Refresh(m.projectPath)
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
@@ -1579,16 +2026,16 @@ func (m *model) commitCmd(message string) tea.Cmd {
 func (m *model) pushCmd() tea.Cmd {
 	if useMockViews {
 		return func() tea.Msg {
-			state := gitview.MockState()
+			state := bentodiffs.MockGitState()
 			state.Cursor = m.git.Cursor
 			return gitRefreshMsg{State: state, Action: "mock: pushed"}
 		}
 	}
 	return func() tea.Msg {
-		if err := gitview.Push(m.projectPath); err != nil {
+		if err := bentodiffs.Push(m.projectPath); err != nil {
 			return gitRefreshMsg{Err: err}
 		}
-		state, err := gitview.Refresh(m.projectPath)
+		state, err := bentodiffs.Refresh(m.projectPath)
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
@@ -1598,7 +2045,7 @@ func (m *model) pushCmd() tea.Cmd {
 
 func (m *model) cloneRepoCmd(url, dest string) tea.Cmd {
 	return func() tea.Msg {
-		projectPath, err := gitview.Clone(url, dest)
+		projectPath, err := bentodiffs.Clone(url, dest)
 		if err != nil {
 			return cloneDoneMsg{Err: err}
 		}
@@ -1608,7 +2055,7 @@ func (m *model) cloneRepoCmd(url, dest string) tea.Cmd {
 
 func (m *model) ensureDiffViewer() {
 	if m.diffViewer == nil {
-		m.diffViewer = bentodiffs.NewViewer(bentodiffs.ViewerOptions{
+		m.diffViewer = bdcore.NewViewer(bdcore.ViewerOptions{
 			SyntaxEnabled:   true,
 			ShowLineNumbers: true,
 			Theme:           theme.CurrentTheme(),
@@ -1616,7 +2063,7 @@ func (m *model) ensureDiffViewer() {
 	}
 }
 
-func diffFileIndexByPath(diffs []bentodiffs.DiffResult, selectedPath string) int {
+func diffFileIndexByPath(diffs []bdcore.DiffResult, selectedPath string) int {
 	if selectedPath == "" || len(diffs) == 0 {
 		return 0
 	}
@@ -1636,11 +2083,12 @@ func (m *model) startOpencodeCmd() tea.Cmd {
 	if targetDir == "" {
 		targetDir = m.localDir
 	}
-	m.tunnelBanner = "glib -> opencode tunnel open | Ctrl+B returns to glib"
 	return func() tea.Msg {
-		time.Sleep(250 * time.Millisecond)
-		err := opencode.Handoff(targetDir)
-		return opencodeDoneMsg{Err: err}
+		state, err := opencode.Start(targetDir)
+		if err != nil {
+			return opencodeStartMsg{Err: err}
+		}
+		return opencodeStartMsg{State: state}
 	}
 }
 

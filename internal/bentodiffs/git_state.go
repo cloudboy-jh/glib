@@ -1,4 +1,4 @@
-package gitview
+package bentodiffs
 
 import (
 	"bytes"
@@ -27,7 +27,7 @@ type CommitInfo struct {
 	Time    time.Time
 }
 
-type State struct {
+type GitState struct {
 	Branch    string
 	Tracking  string
 	Ahead     int
@@ -115,26 +115,26 @@ func Clone(url, dest string) (string, error) {
 	return destAbs, nil
 }
 
-func Refresh(dir string) (State, error) {
+func Refresh(dir string) (GitState, error) {
 	if !IsGitRepo(dir) {
-		return State{}, fmt.Errorf("not a git repo: %s", dir)
+		return GitState{}, fmt.Errorf("not a git repo: %s", dir)
 	}
 	branch, tracking, ahead, behind, err := branchState(dir)
 	if err != nil {
-		return State{}, err
+		return GitState{}, err
 	}
 	stats, err := fileStats(dir)
 	if err != nil {
-		return State{}, err
+		return GitState{}, err
 	}
 	staged, unstaged, untracked, changedTotal, stagedTotal := groupedFiles(dir, stats)
 	lastCommit, err := latestCommit(dir)
 	if err != nil {
-		return State{}, err
+		return GitState{}, err
 	}
 	addedTotal, deletedTotal := aggregateTotals(stats)
 
-	return State{
+	return GitState{
 		Branch:       branch,
 		Tracking:     tracking,
 		Ahead:        ahead,
@@ -176,7 +176,7 @@ func Push(dir string) error {
 	return err
 }
 
-func (s *State) Rows() []Row {
+func (s *GitState) Rows() []Row {
 	rows := make([]Row, 0, len(s.Staged)+len(s.Unstaged)+len(s.Untracked)+6)
 	rows = append(rows, Row{Kind: rowHeader, Label: fmt.Sprintf("STAGED (%d)", len(s.Staged))})
 	for _, f := range s.Staged {
@@ -193,7 +193,7 @@ func (s *State) Rows() []Row {
 	return rows
 }
 
-func (s *State) MoveCursor(delta int) {
+func (s *GitState) MoveCursor(delta int) {
 	rows := s.Rows()
 	if len(rows) == 0 {
 		s.Cursor = 0
@@ -213,7 +213,7 @@ func (s *State) MoveCursor(delta int) {
 	s.Cursor = next
 }
 
-func (s *State) SelectedFile() (FileEntry, bool) {
+func (s *GitState) SelectedFile() (FileEntry, bool) {
 	rows := s.Rows()
 	if len(rows) == 0 || s.Cursor < 0 || s.Cursor >= len(rows) {
 		return FileEntry{}, false
@@ -225,7 +225,7 @@ func (s *State) SelectedFile() (FileEntry, bool) {
 	return row.File, true
 }
 
-func (s *State) OpenSelectedDiffCmd() tea.Cmd {
+func (s *GitState) OpenSelectedDiffCmd() tea.Cmd {
 	f, ok := s.SelectedFile()
 	if !ok {
 		return nil

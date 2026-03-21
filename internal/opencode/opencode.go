@@ -21,8 +21,11 @@ type State struct {
 	Running bool
 }
 
-func Start() (State, error) {
+func Start(projectDir string) (State, error) {
 	cmd := exec.Command("opencode")
+	if projectDir != "" {
+		cmd.Dir = projectDir
+	}
 	if runtime.GOOS == "windows" {
 		return startWithPipes(cmd)
 	}

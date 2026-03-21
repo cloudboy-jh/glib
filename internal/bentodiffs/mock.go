@@ -1,9 +1,9 @@
-package gitview
+package bentodiffs
 
 import "time"
 
-func MockState() State {
-	return State{
+func MockGitState() GitState {
+	return GitState{
 		Branch:       "feat/diff-renderer",
 		Tracking:     "origin/main",
 		Ahead:        1,
@@ -26,20 +26,20 @@ func MockState() State {
 
 func mockStaged() []FileEntry {
 	return []FileEntry{
-		{Status: "M", Path: "internal/diffview/diffview.go", Added: 77, Deleted: 21},
-		{Status: "A", Path: "internal/diffview/mock.go", Added: 42, Deleted: 0},
+		{Status: "M", Path: "internal/bentodiffs/diff_state.go", Added: 77, Deleted: 21},
+		{Status: "A", Path: "internal/bentodiffs/mock.go", Added: 42, Deleted: 0},
 	}
 }
 
 func mockUnstaged() []FileEntry {
 	return []FileEntry{
 		{Status: "M", Path: "internal/app/app.go", Added: 35, Deleted: 12},
-		{Status: "M", Path: "internal/gitview/gitview.go", Added: 24, Deleted: 9},
+		{Status: "M", Path: "internal/bentodiffs/git_state.go", Added: 24, Deleted: 9},
 	}
 }
 
 func mockUntracked() []FileEntry {
 	return []FileEntry{
-		{Status: "?", Path: "internal/gitview/mock.go", Added: 11, Deleted: 0},
+		{Status: "?", Path: "internal/bentodiffs/mock.go", Added: 11, Deleted: 0},
 	}
 }
