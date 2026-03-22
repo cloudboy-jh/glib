@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -22,6 +23,7 @@ import (
 	"github.com/cloudboy-jh/bentotui/registry/rooms"
 	"github.com/cloudboy-jh/bentotui/theme"
 	"github.com/cloudboy-jh/bentotui/theme/styles"
+	"github.com/hinshun/vt10x"
 	"glib/internal/bentodiffs"
 	"glib/internal/githubauth"
 	"glib/internal/opencode"
@@ -120,6 +122,10 @@ type opencodeStartMsg struct {
 	Err   error
 }
 
+type opencodeExitArmTimeoutMsg struct {
+	Seq int
+}
+
 type localTreeRow struct {
 	Path  string
 	IsDir bool
@@ -139,50 +145,53 @@ type iconSet struct {
 }
 
 type model struct {
-	footer           *vimstatus.Model
-	inputBox         *input.Model
-	promptInput      *input.Model
-	localPicker      *selectx.Model
-	themePicker      *selectx.Model
-	width            int
-	height           int
-	inputW           int
-	mode             appMode
-	picker           pickerMode
-	projectPath      string
-	recent           []string
-	statusMessage    string
-	tunnelBanner     string
-	errorText        string
-	prompt           promptMode
-	promptTitle      string
-	promptHint       string
-	pendingURL       string
-	pendingPath      string
-	git              bentodiffs.GitState
-	diff             bentodiffs.DiffState
-	diffViewer       bdcore.Viewer
-	opencode         opencode.State
-	localDir         string
-	localEntries     []projects.Entry
-	localRows        []localTreeRow
-	localCursor      int
-	localScroll      int
-	localListH       int
-	localExpanded    map[string]bool
-	icons            iconSet
-	authStatus       string
-	authClientID     string
-	authToken        string
-	authDevice       githubauth.DeviceCode
-	repos            []githubauth.Repo
-	repoCursor       int
-	repoPage         int
-	repoActionOpen   bool
-	repoActionCursor int
-	pendingLaunch    string
-	workspace        *workspace.Manager
-	workspaceKind    workspace.Kind
+	footer            *vimstatus.Model
+	inputBox          *input.Model
+	promptInput       *input.Model
+	localPicker       *selectx.Model
+	themePicker       *selectx.Model
+	width             int
+	height            int
+	inputW            int
+	mode              appMode
+	picker            pickerMode
+	projectPath       string
+	recent            []string
+	statusMessage     string
+	tunnelBanner      string
+	errorText         string
+	prompt            promptMode
+	promptTitle       string
+	promptHint        string
+	pendingURL        string
+	pendingPath       string
+	git               bentodiffs.GitState
+	diff              bentodiffs.DiffState
+	diffViewer        bdcore.Viewer
+	opencode          opencode.State
+	localDir          string
+	localEntries      []projects.Entry
+	localRows         []localTreeRow
+	localCursor       int
+	localScroll       int
+	localListH        int
+	localExpanded     map[string]bool
+	icons             iconSet
+	authStatus        string
+	authClientID      string
+	authToken         string
+	authDevice        githubauth.DeviceCode
+	repos             []githubauth.Repo
+	repoCursor        int
+	repoPage          int
+	repoActionOpen    bool
+	repoActionCursor  int
+	pendingLaunch     string
+	opencodeExitArmed bool
+	opencodeExitSeq   int
+	opencodeTerm      vt10x.Terminal
+	workspace         *workspace.Manager
+	workspaceKind     workspace.Kind
 }
 
 func NewModel() *model {
@@ -247,6 +256,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.footer.SetSize(m.width, 1)
 		if m.diffViewer != nil {
 			m.diffViewer.SetSize(max(20, m.width-2), max(1, m.bodyHeight()-2))
+		}
+		if m.opencode.Running {
+			vw, vh := m.opencodeViewportSize()
+			m.opencode.Resize(vw, vh)
+			if m.opencodeTerm != nil {
+				m.opencodeTerm.Resize(vw, vh)
+			}
 		}
 		return m, nil
 
@@ -411,9 +427,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.opencode.Buffer) > 200000 {
 				m.opencode.Buffer = m.opencode.Buffer[len(m.opencode.Buffer)-200000:]
 			}
-			return m, m.readOpencodeChunkCmd()
+			if m.opencodeTerm != nil {
+				_, _ = m.opencodeTerm.Write(msg.Data)
+			}
 		}
-		return m, nil
+		return m, m.readOpencodeChunkCmd()
 
 	case opencodeStartMsg:
 		if msg.Err != nil {
@@ -422,8 +440,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.opencode = msg.State
+		vw, vh := m.opencodeViewportSize()
+		m.opencode.Resize(vw, vh)
+		m.opencodeTerm = vt10x.New(vt10x.WithSize(vw, vh))
+		m.opencodeExitArmed = false
 		m.tunnelBanner = "glib -> opencode tunnel open"
 		return m, m.readOpencodeChunkCmd()
+
+	case opencodeExitArmTimeoutMsg:
+		if m.opencodeExitArmed && m.opencodeExitSeq == msg.Seq {
+			m.opencodeExitArmed = false
+		}
+		return m, nil
 
 	case tea.KeyMsg:
 		if m.tunnelBanner != "" && msg.String() != "o" {
@@ -435,6 +463,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch msg.String() {
 		case "ctrl+c":
+			if m.mode == modeOpencode {
+				return m, m.forwardOpencodeInputCmd(msg)
+			}
 			m.stopOpencode()
 			return m, tea.Quit
 		case "q":
@@ -516,14 +547,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.mode == modeOpencode {
-			switch msg.String() {
-			case "esc", "ctrl+b":
-				m.stopOpencode()
-				m.mode = modeProjects
-				return m, nil
-			default:
-				return m, m.forwardOpencodeInputCmd(msg)
+			if msg.String() == "ctrl+g" {
+				if m.opencodeExitArmed {
+					m.stopOpencode()
+					m.mode = modeProjects
+					m.statusMessage = "opencode terminated"
+					return m, nil
+				}
+				m.opencodeExitArmed = true
+				m.opencodeExitSeq++
+				return m, m.opencodeExitArmTimeoutCmd(m.opencodeExitSeq)
 			}
+			if m.opencodeExitArmed {
+				m.opencodeExitArmed = false
+			}
+			return m, m.forwardOpencodeInputCmd(msg)
 		}
 
 		if m.mode == modeProjects {
@@ -547,10 +585,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.picker == pickerRepos {
 				if m.repoActionOpen {
 					switch msg.String() {
-					case "j", "down":
+					case "j", "down", "l", "right":
 						m.repoActionCursor = clamp(m.repoActionCursor+1, 0, 1)
 						return m, nil
-					case "k", "up":
+					case "k", "up", "h", "left":
 						m.repoActionCursor = clamp(m.repoActionCursor-1, 0, 1)
 						return m, nil
 					case "esc":
@@ -1024,44 +1062,57 @@ func (m *model) drawRepoProjectsView(surf *surface.Surface, bodyH int, t theme.T
 		Render(content)
 	blockW := lipgloss.Width(block)
 	blockH := lipgloss.Height(block)
-	x := max(0, (m.width-blockW)/2)
-	y := max(0, (bodyH-blockH)/2)
-	surf.Draw(x, y, block)
+	wm := lipgloss.NewStyle().
+		Foreground(t.TextAccent()).
+		Bold(true).
+		Render(glibWordmark)
+	wmW := lipgloss.Width(wm)
+	wmH := lipgloss.Height(wm)
 
 	actionKbd := dim.Render("move ") + bright.Render("j/k") + dim.Render("  actions ") + bright.Render("enter") + dim.Render("  backend ") + bright.Render("b") + dim.Render("  refresh ") + bright.Render("r")
+	actionBar := ""
 	if m.repoActionOpen {
-		actionRows := []string{
-			fmt.Sprintf("  %s Diff", m.icons.Diff),
-			fmt.Sprintf("  %s Opencode", m.icons.Opencode),
-		}
-		base := lipgloss.NewStyle().Width(contentW).Background(t.BackgroundPanel()).Foreground(t.Text())
-		active := base.Copy().Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Bold(true)
-		for i := range actionRows {
-			if i == m.repoActionCursor {
-				actionRows[i] = active.Render(fitLine(actionRows[i], contentW))
-			} else {
-				actionRows[i] = base.Render(fitLine(actionRows[i], contentW))
+		item := func(label string, active bool) string {
+			st := lipgloss.NewStyle().
+				Padding(0, 1).
+				Foreground(t.Text())
+			if active {
+				st = st.Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Bold(true)
 			}
+			return st.Render(label)
 		}
-		actionTitle := "Run on selected repo"
-		actionBody := lipgloss.JoinVertical(lipgloss.Left,
-			lipgloss.NewStyle().Foreground(t.TextMuted()).Render(actionTitle),
-			"",
-			lipgloss.JoinVertical(lipgloss.Left, actionRows...),
-		)
-		actionBlock := lipgloss.NewStyle().
+		diffItem := item(fmt.Sprintf("%s Diff", m.icons.Diff), m.repoActionCursor == 0)
+		opencodeItem := item(fmt.Sprintf("%s Opencode", m.icons.Opencode), m.repoActionCursor == 1)
+		barLine := diffItem + "   " + opencodeItem
+		barW := lipgloss.Width(barLine) + 2
+		actionBar = lipgloss.NewStyle().
 			Background(t.BackgroundPanel()).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(t.BorderFocus()).
+			Foreground(t.Text()).
 			Padding(0, 1).
-			Width(contentW).
-			Render(actionBody)
-		surf.Draw(x, y+blockH+1, actionBlock)
-		actionKbd = dim.Render("choose ") + bright.Render("j/k") + dim.Render("  run ") + bright.Render("enter") + dim.Render("  back ") + bright.Render("esc")
-		surf.Draw(max(0, (m.width-lipgloss.Width(actionKbd))/2), y+blockH+lipgloss.Height(actionBlock)+2, actionKbd)
-		return
+			Width(barW).
+			Render(barLine)
+		actionKbd = dim.Render("choose ") + bright.Render("h/l or arrows") + dim.Render("  run ") + bright.Render("enter") + dim.Render("  back ") + bright.Render("esc")
 	}
-	surf.Draw(max(0, (m.width-lipgloss.Width(actionKbd))/2), y+blockH+1, actionKbd)
+
+	stackH := wmH + 1 + blockH + 1 + 1
+	if actionBar != "" {
+		stackH += lipgloss.Height(actionBar) + 1
+	}
+	stackY := max(0, (bodyH-stackH)/2)
+	x := max(0, (m.width-blockW)/2)
+	y := stackY
+
+	surf.Draw(max(0, (m.width-wmW)/2), y, wm)
+	y += wmH + 1
+	surf.Draw(x, y, block)
+	y += blockH + 1
+
+	if actionBar != "" {
+		surf.Draw(max(0, (m.width-lipgloss.Width(actionBar))/2), y, actionBar)
+		y += lipgloss.Height(actionBar) + 1
+	}
+
+	surf.Draw(max(0, (m.width-lipgloss.Width(actionKbd))/2), y, actionKbd)
 }
 
 func (m *model) drawDiffView(surf *surface.Surface, bodyW, bodyH int, t theme.Theme) {
@@ -1231,45 +1282,60 @@ func (m *model) drawGitView(surf *surface.Surface, bodyW, bodyH int, t theme.The
 }
 
 func (m *model) drawOpencodeView(surf *surface.Surface, bodyH int, t theme.Theme) {
-	wm := wordmarkx.New("glib")
-	wm.SetBold(true)
-	tag := badge.New("OPENCODE")
-	tag.SetVariant(badge.VariantInfo)
-	tag.SetBold(true)
-
-	contentW := max(8, m.width-6)
-	contentH := max(1, bodyH-4)
-	lines := []string{}
-	if !m.opencode.Running {
-		lines = append(lines,
-			lipgloss.NewStyle().Foreground(t.TextMuted()).Render("starting opencode tunnel..."),
-			lipgloss.NewStyle().Foreground(t.TextMuted()).Render("esc / ctrl+b returns to projects"),
-		)
-	} else {
-		raw := strings.Split(strings.ReplaceAll(string(m.opencode.Buffer), "\r", ""), "\n")
-		if len(raw) > contentH {
-			raw = raw[len(raw)-contentH:]
-		}
-		for _, line := range raw {
-			lines = append(lines, fitLine(line, contentW))
-		}
+	if m.width <= 2 || bodyH <= 2 {
+		return
 	}
+	vw, vh := m.opencodeViewportSize()
+	b := lipgloss.RoundedBorder()
+	borderStyle := lipgloss.NewStyle().Foreground(t.BorderFocus())
+	top := borderStyle.Render(b.TopLeft + strings.Repeat(b.Top, vw) + b.TopRight)
+	bottom := borderStyle.Render(b.BottomLeft + strings.Repeat(b.Bottom, vw) + b.BottomRight)
+	surf.Draw(0, 0, top)
+	for y := 0; y < vh; y++ {
+		middle := borderStyle.Render(b.Left) + strings.Repeat(" ", vw) + borderStyle.Render(b.Right)
+		surf.Draw(0, y+1, middle)
+	}
+	surf.Draw(0, vh+1, bottom)
 
-	content := &staticTextModel{text: strings.Join(lines, "\n")}
-	p := card.New(
-		card.Title(fmt.Sprintf("%s  %s", viewString(wm.View()), viewString(tag.View()))),
-		card.Content(content),
-		card.Raised(),
-	)
-	p.SetSize(max(1, m.width-2), max(1, bodyH-1))
-	ring := lipgloss.NewStyle().
-		Width(max(1, m.width)).
-		Height(max(1, bodyH)).
-		Padding(0, 1).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(t.BorderFocus()).
-		Render(viewString(p.View()))
-	surf.Draw(0, 0, ring)
+	lines := m.opencodeViewportLines(vw, vh)
+	for y, line := range lines {
+		surf.Draw(1, y+1, line)
+	}
+}
+
+func (m *model) opencodeViewportLines(cols, rows int) []string {
+	if cols <= 0 || rows <= 0 {
+		return nil
+	}
+	lines := make([]string, 0, rows)
+	if m.opencodeTerm == nil {
+		msg := "starting opencode..."
+		if m.opencode.Running {
+			msg = "connected, waiting for output..."
+		}
+		lines = append(lines, fitLine(msg, cols))
+		for len(lines) < rows {
+			lines = append(lines, "")
+		}
+		return lines
+	}
+	m.opencodeTerm.Lock()
+	defer m.opencodeTerm.Unlock()
+
+	for y := 0; y < rows; y++ {
+		r := make([]rune, cols)
+		for x := 0; x < cols; x++ {
+			g := m.opencodeTerm.Cell(x, y)
+			ch := g.Char
+			if ch == 0 {
+				ch = ' '
+			}
+			r[x] = ch
+		}
+		line := strings.TrimRight(string(r), " ")
+		lines = append(lines, fitLine(line, cols))
+	}
+	return lines
 }
 
 func (m *model) syncFooter() {
@@ -1291,7 +1357,7 @@ func (m *model) syncFooter() {
 			cfg.Scroll = strings.ToLower(m.authStatus)
 		} else if m.picker == pickerRepos {
 			if m.repoActionOpen {
-				cfg.Context = m.icons.Projects + " j/k choose  enter run  esc back"
+				cfg.Context = m.icons.Projects + " h/l choose  enter run  esc back"
 			} else {
 				cfg.Context = m.icons.Projects + " j/k move  enter actions  b backend  r refresh"
 			}
@@ -1320,7 +1386,11 @@ func (m *model) syncFooter() {
 		}
 		cfg.Scroll = fmt.Sprintf("+%d -%d", m.git.AddedTotal, m.git.DeletedTotal)
 	case modeOpencode:
-		cfg.Context = m.icons.Opencode + " tunneled  esc/ctrl+b return"
+		if m.opencodeExitArmed {
+			cfg.Context = m.icons.Opencode + " press ctrl+g again to exit"
+		} else {
+			cfg.Context = m.icons.Opencode + " passthrough  ctrl+g ctrl+g exit"
+		}
 		if m.opencode.Running {
 			cfg.Scroll = "live"
 		} else {
@@ -1477,6 +1547,10 @@ func (m *model) renderPrompt(t theme.Theme) string {
 
 func (m *model) bodyHeight() int {
 	return max(0, m.height-1)
+}
+
+func (m *model) opencodeViewportSize() (int, int) {
+	return max(1, m.width-2), max(1, m.bodyHeight()-2)
 }
 
 func (m *model) projectsPanelWidth() int {
@@ -2115,7 +2189,15 @@ func (m *model) forwardOpencodeInputCmd(k tea.KeyMsg) tea.Cmd {
 	}
 }
 
+func (m *model) opencodeExitArmTimeoutCmd(seq int) tea.Cmd {
+	return tea.Tick(1500*time.Millisecond, func(time.Time) tea.Msg {
+		return opencodeExitArmTimeoutMsg{Seq: seq}
+	})
+}
+
 func (m *model) stopOpencode() {
+	m.opencodeExitArmed = false
+	m.opencodeTerm = nil
 	m.opencode.Stop()
 }
 

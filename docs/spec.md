@@ -58,6 +58,7 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 - Navigation supports cursor movement and explicit refresh.
 - Repo list viewport is fixed to 5 visible rows with scroll window behavior.
 - `enter` on repo opens an action chooser rendered below the repo card.
+- Action chooser is a compact horizontal bar rendered below the repo card.
 - Action chooser options:
   - `Diff`: materialize repo, then route to `DIFF` mode
   - `Opencode`: materialize repo, then route to `OPENCODE` mode
@@ -91,9 +92,10 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 ## Opencode Contract (`o`)
 
 - Starts `opencode` process in active project directory.
-- Streams process output into app screen.
-- Forwards keyboard input to subprocess.
-- `esc` / `ctrl+b` returns to `PROJECTS` and closes tunnel.
+- Streams process output directly in glib body region (no nested opencode frame).
+- Body region is wrapped by a thin focus ring viewport while glib footer remains global.
+- Forwards keyboard input to subprocess by default.
+- Exit contract: `ctrl+g` then `ctrl+g` terminates process and returns to `PROJECTS`.
 
 ## Architecture Boundaries
 

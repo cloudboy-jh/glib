@@ -45,14 +45,17 @@ By default, `glib` ships with a built-in GitHub OAuth client id so release users
 
 - global: `p` projects, `g` git, `d` diff, `o` opencode, `t` theme, `q` quit
 - projects repo picker: `j/k` move, `enter` open action chooser, `b` backend toggle, `r` refresh repos
-- projects action chooser (shown below repo card): `j/k` choose action, `enter` run, `esc` back
+- projects action chooser (shown below repo card): `h/l` or arrows choose action, `enter` run, `esc` back
 - diff: `j/k` scroll, `ctrl+d`/`ctrl+u` page, `n/N` file nav, `{`/`}` hunk nav
 - git: `s` stage, `u` unstage, `d` discard, `c` commit, `p` push, `enter` open file diff
+- opencode: passthrough terminal input; `ctrl+g` then `ctrl+g` terminates and returns
+
+In `OPENCODE`, glib keeps a focused terminal viewport ring around the process area while footer bar remains the only global command surface.
 
 ## Repo Selection UX
 
 - Repo list viewport is intentionally compact (5 visible rows) with keyboard scrolling.
-- Selecting a repo opens a lightweight chooser below the repo card:
+- Selecting a repo opens a lightweight horizontal action bar below the repo card:
   - `Diff` opens `bento-diffs` workflow for the selected repo.
   - `Opencode` opens opencode tunnel for the selected repo.
 

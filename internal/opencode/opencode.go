@@ -16,6 +16,7 @@ type State struct {
 	Cmd     *exec.Cmd
 	Reader  io.Reader
 	Writer  io.Writer
+	TTY     *os.File
 	closers []io.Closer
 	Buffer  []byte
 	Running bool
@@ -33,7 +34,7 @@ func Start(projectDir string) (State, error) {
 	if err != nil {
 		return startWithPipes(cmd)
 	}
-	return State{Cmd: cmd, Reader: f, Writer: f, closers: []io.Closer{f}, Running: true}, nil
+	return State{Cmd: cmd, Reader: f, Writer: f, TTY: f, closers: []io.Closer{f}, Running: true}, nil
 }
 
 func startWithPipes(cmd *exec.Cmd) (State, error) {
@@ -113,6 +114,13 @@ func (s *State) ForwardInput(k tea.KeyMsg) {
 	_, _ = s.Writer.Write(data)
 }
 
+func (s *State) Resize(width, height int) {
+	if !s.Running || s.TTY == nil || width <= 0 || height <= 0 {
+		return
+	}
+	_ = pty.Setsize(s.TTY, &pty.Winsize{Cols: uint16(width), Rows: uint16(height)})
+}
+
 func keyToBytes(k tea.KeyMsg) []byte {
 	s := k.String()
 	switch s {
@@ -120,6 +128,8 @@ func keyToBytes(k tea.KeyMsg) []byte {
 		return []byte("\r")
 	case "tab":
 		return []byte("\t")
+	case "esc":
+		return []byte("\x1b")
 	case "backspace":
 		return []byte{127}
 	case "up":
