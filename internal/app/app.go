@@ -1,14 +1,10 @@
 package app
 
 import (
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -23,10 +19,10 @@ import (
 	"github.com/cloudboy-jh/bentotui/registry/rooms"
 	"github.com/cloudboy-jh/bentotui/theme"
 	"github.com/cloudboy-jh/bentotui/theme/styles"
-	"github.com/hinshun/vt10x"
 	"glib/internal/bentodiffs"
 	"glib/internal/githubauth"
-	"glib/internal/opencode"
+	"glib/internal/pi"
+	"glib/internal/piui"
 	"glib/internal/projects"
 	"glib/internal/workspace"
 )
@@ -50,7 +46,7 @@ const (
 	modeProjects appMode = "PROJECTS"
 	modeDiff     appMode = "DIFF"
 	modeGit      appMode = "GIT"
-	modeOpencode appMode = "OPENCODE"
+	modePI       appMode = "PI"
 )
 
 type pickerMode string
@@ -70,6 +66,8 @@ const (
 	promptDiscard   promptMode = "discard"
 	promptError     promptMode = "error"
 	promptTheme     promptMode = "theme"
+	promptNewProj   promptMode = "new_project"
+	promptDiffRev   promptMode = "diff_revision"
 )
 
 type gitRefreshMsg struct {
@@ -112,18 +110,17 @@ type reposMsg struct {
 	Err   error
 }
 
-type opencodeChunkMsg struct {
-	Data []byte
+type piStartMsg struct {
+	Proc *pi.PiProcess
 	Err  error
 }
 
-type opencodeStartMsg struct {
-	State opencode.State
-	Err   error
+type piSendMsg struct {
+	Err error
 }
 
-type opencodeExitArmTimeoutMsg struct {
-	Seq int
+type workspaceCleanupMsg struct {
+	Result workspace.CleanupResult
 }
 
 type localTreeRow struct {
@@ -137,7 +134,7 @@ type iconSet struct {
 	Clone    string
 	Root     string
 	Dot      string
-	Opencode string
+	PI       string
 	Diff     string
 	Git      string
 	Quit     string
@@ -145,53 +142,56 @@ type iconSet struct {
 }
 
 type model struct {
-	footer            *vimstatus.Model
-	inputBox          *input.Model
-	promptInput       *input.Model
-	localPicker       *selectx.Model
-	themePicker       *selectx.Model
-	width             int
-	height            int
-	inputW            int
-	mode              appMode
-	picker            pickerMode
-	projectPath       string
-	recent            []string
-	statusMessage     string
-	tunnelBanner      string
-	errorText         string
-	prompt            promptMode
-	promptTitle       string
-	promptHint        string
-	pendingURL        string
-	pendingPath       string
-	git               bentodiffs.GitState
-	diff              bentodiffs.DiffState
-	diffViewer        bdcore.Viewer
-	opencode          opencode.State
-	localDir          string
-	localEntries      []projects.Entry
-	localRows         []localTreeRow
-	localCursor       int
-	localScroll       int
-	localListH        int
-	localExpanded     map[string]bool
-	icons             iconSet
-	authStatus        string
-	authClientID      string
-	authToken         string
-	authDevice        githubauth.DeviceCode
-	repos             []githubauth.Repo
-	repoCursor        int
-	repoPage          int
-	repoActionOpen    bool
-	repoActionCursor  int
-	pendingLaunch     string
-	opencodeExitArmed bool
-	opencodeExitSeq   int
-	opencodeTerm      vt10x.Terminal
-	workspace         *workspace.Manager
-	workspaceKind     workspace.Kind
+	footer           *vimstatus.Model
+	inputBox         *input.Model
+	promptInput      *input.Model
+	localPicker      *selectx.Model
+	themePicker      *selectx.Model
+	width            int
+	height           int
+	inputW           int
+	mode             appMode
+	picker           pickerMode
+	projectPath      string
+	activeRepoName   string
+	pendingRepoName  string
+	recent           []string
+	lastRepo         string
+	statusMessage    string
+	errorText        string
+	prompt           promptMode
+	promptTitle      string
+	promptHint       string
+	pendingURL       string
+	pendingPath      string
+	git              bentodiffs.GitState
+	diff             bentodiffs.DiffState
+	diffViewer       bdcore.Viewer
+	piProc           *pi.PiProcess
+	piui             *piui.Session
+	localDir         string
+	localEntries     []projects.Entry
+	localRows        []localTreeRow
+	localCursor      int
+	localScroll      int
+	localListH       int
+	localExpanded    map[string]bool
+	icons            iconSet
+	authStatus       string
+	authClientID     string
+	authToken        string
+	authDevice       githubauth.DeviceCode
+	repos            []githubauth.Repo
+	repoCursor       int
+	repoPage         int
+	repoActionOpen   bool
+	repoActionCursor int
+	pendingLaunch    string
+	workspace        *workspace.Manager
+	workspaceKind    workspace.Kind
+	quitting         bool
+	pendingSlash     map[string]string
+	slashSeq         int
 }
 
 func NewModel() *model {
@@ -207,12 +207,14 @@ func NewModel() *model {
 	tp.SetPlaceholder("No themes")
 	tp.Focus()
 	tp.Open()
+	piSession := piui.NewSession()
 
 	cwd, _ := os.Getwd()
 	m := &model{
 		footer:        vimstatus.New(theme.CurrentTheme()),
 		inputBox:      inp,
 		promptInput:   promptInp,
+		piui:          piSession,
 		localPicker:   lp,
 		themePicker:   tp,
 		mode:          modeProjects,
@@ -225,6 +227,7 @@ func NewModel() *model {
 		authClientID:  resolveGitHubClientID(),
 		repoPage:      1,
 		workspaceKind: workspace.KindLocal,
+		pendingSlash:  map[string]string{},
 	}
 	ws, err := workspace.NewManager(workspace.KindLocal)
 	if err == nil {
@@ -252,18 +255,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.inputW = clamp(m.width*6/10, 50, 90)
 		m.inputBox.SetSize(m.inputW-5, 1)
 		m.promptInput.SetSize(max(20, m.width/2), 1)
+		m.piui.SetSize(m.width, m.bodyHeight())
 		m.resizeLocalPicker()
 		m.footer.SetSize(m.width, 1)
 		if m.diffViewer != nil {
 			m.diffViewer.SetSize(max(20, m.width-2), max(1, m.bodyHeight()-2))
 		}
-		if m.opencode.Running {
-			vw, vh := m.opencodeViewportSize()
-			m.opencode.Resize(vw, vh)
-			if m.opencodeTerm != nil {
-				m.opencodeTerm.Resize(vw, vh)
-			}
-		}
+		m.refreshAgentViewport()
 		return m, nil
 
 	case theme.ThemeChangedMsg:
@@ -321,11 +319,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case cloneDoneMsg:
 		if msg.Err != nil {
 			m.pendingLaunch = ""
+			m.pendingRepoName = ""
 			m.repoActionOpen = false
 			m.showError(msg.Err.Error())
 			return m, nil
 		}
 		m.projectPath = msg.ProjectPath
+		if strings.TrimSpace(m.pendingRepoName) != "" {
+			m.activeRepoName = strings.TrimSpace(m.pendingRepoName)
+			m.pendingRepoName = ""
+		} else {
+			m.activeRepoName = inferRepoNameFromPath(msg.ProjectPath)
+		}
 		m.addRecent(msg.ProjectPath)
 		m.statusMessage = "repo ready"
 		launch := m.pendingLaunch
@@ -340,10 +345,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m, m.refreshDiffCmd("", "", "")
-		case "opencode":
-			m.mode = modeOpencode
-			m.opencode.Buffer = nil
-			return m, m.startOpencodeCmd()
+		case "git":
+			m.mode = modeGit
+			if useMockViews {
+				m.git = bentodiffs.MockGitState()
+				return m, nil
+			}
+			return m, m.refreshGitCmd()
+		case "pi":
+			m.mode = modePI
+			return m, m.startPiCmd()
 		default:
 			m.mode = modeProjects
 			return m, nil
@@ -394,84 +405,121 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showError(msg.Err.Error())
 			return m, nil
 		}
-		sort.Slice(msg.Repos, func(i, j int) bool {
-			return strings.ToLower(msg.Repos[i].FullName) < strings.ToLower(msg.Repos[j].FullName)
-		})
-		m.repos = msg.Repos
+		m.repos = m.orderRepos(msg.Repos)
 		if len(m.repos) == 0 {
 			m.repoCursor = 0
 		} else {
-			m.repoCursor = clamp(m.repoCursor, 0, len(m.repos)-1)
+			m.repoCursor = m.lastRepoIndex()
 		}
 		m.repoActionOpen = false
 		m.repoActionCursor = 0
 		m.picker = pickerRepos
 		return m, nil
 
-	case opencodeChunkMsg:
-		if msg.Err != nil {
-			if errors.Is(msg.Err, io.EOF) {
-				m.stopOpencode()
-				m.tunnelBanner = "opencode -> glib tunnel closed"
-				m.statusMessage = "returned from opencode"
-				m.mode = modeProjects
-				return m, nil
-			}
-			m.stopOpencode()
-			m.showError("opencode stream closed")
-			m.mode = modeProjects
-			return m, nil
-		}
-		if len(msg.Data) > 0 {
-			m.opencode.Buffer = append(m.opencode.Buffer, msg.Data...)
-			if len(m.opencode.Buffer) > 200000 {
-				m.opencode.Buffer = m.opencode.Buffer[len(m.opencode.Buffer)-200000:]
-			}
-			if m.opencodeTerm != nil {
-				_, _ = m.opencodeTerm.Write(msg.Data)
-			}
-		}
-		return m, m.readOpencodeChunkCmd()
-
-	case opencodeStartMsg:
+	case piStartMsg:
 		if msg.Err != nil {
 			m.mode = modeProjects
-			m.showError("opencode failed to start: " + msg.Err.Error())
+			m.showError("pi failed to start: " + msg.Err.Error())
 			return m, nil
 		}
-		m.opencode = msg.State
-		vw, vh := m.opencodeViewportSize()
-		m.opencode.Resize(vw, vh)
-		m.opencodeTerm = vt10x.New(vt10x.WithSize(vw, vh))
-		m.opencodeExitArmed = false
-		m.tunnelBanner = "glib -> opencode tunnel open"
-		return m, m.readOpencodeChunkCmd()
+		m.piProc = msg.Proc
+		m.piui.Status = "connected"
+		m.refreshAgentViewport()
+		return m, tea.Batch(
+			m.readPiEventCmd(),
+			piui.SpinnerTickCmd(),
+			m.sendPiCmd(pi.CmdGetState()),
+			m.sendPiCmd(map[string]any{"type": "get_commands"}),
+			m.sendPiCmd(map[string]any{"type": "get_session_stats"}),
+		)
 
-	case opencodeExitArmTimeoutMsg:
-		if m.opencodeExitArmed && m.opencodeExitSeq == msg.Seq {
-			m.opencodeExitArmed = false
+	case piSendMsg:
+		if msg.Err != nil {
+			m.showError(msg.Err.Error())
+			return m, nil
+		}
+		return m, m.readPiEventCmd()
+
+	case pi.PiEventMsg:
+		next := m.handlePiEvent(msg)
+		m.refreshAgentViewport()
+		return m, tea.Batch(m.readPiEventCmd(), next)
+
+	case pi.PiResponseMsg:
+		if cmdName, ok := m.pendingSlash[msg.ID]; ok {
+			delete(m.pendingSlash, msg.ID)
+			m.appendSlashResponse(cmdName, msg)
+			m.refreshAgentViewport()
+			return m, m.readPiEventCmd()
+		}
+		if !msg.Success && strings.TrimSpace(msg.Error) != "" {
+			m.showError("pi command failed: " + msg.Error)
+			return m, m.readPiEventCmd()
+		}
+		switch msg.Command {
+		case "get_state":
+			m.piui.ApplyState(msg.Data)
+		case "get_session_stats":
+			m.piui.ApplyStats(msg.Data)
+		case "get_commands":
+			m.piui.ApplyCommands(msg.Data)
+		}
+		m.refreshAgentViewport()
+		return m, m.readPiEventCmd()
+
+	case pi.PiExitMsg:
+		m.stopPi()
+		m.piui.StopStreaming()
+		m.piui.Streaming = false
+		m.piui.ToolRunning = false
+		m.piui.Status = "stopped"
+		if msg.Err != nil {
+			m.showError("pi exited: " + msg.Err.Error())
+			m.piui.Messages = append(m.piui.Messages, piui.Message{
+				Role: piui.RoleTool,
+				ToolBlock: &piui.ToolBlock{
+					Name:   "pi",
+					Output: "Process exited. Check PI model/API configuration, then press i to retry.",
+					Done:   true,
+					ExitOK: false,
+				},
+			})
+			m.refreshAgentViewport()
+		}
+		return m, nil
+
+	case piui.SpinnerTickMsg:
+		m.piui.TickSpinner()
+		if m.mode == modePI {
+			return m, piui.SpinnerTickCmd()
+		}
+		return m, nil
+
+	case workspaceCleanupMsg:
+		if len(msg.Result.Warnings) > 0 {
+			m.statusMessage = "quit cleanup: " + msg.Result.Warnings[0]
+		} else if len(msg.Result.Removed) > 0 {
+			m.statusMessage = fmt.Sprintf("quit cleanup: removed %d ephemeral worktrees", len(msg.Result.Removed))
+		}
+		if m.quitting {
+			return m, tea.Quit
 		}
 		return m, nil
 
 	case tea.KeyMsg:
-		if m.tunnelBanner != "" && msg.String() != "o" {
-			m.tunnelBanner = ""
-		}
 		if m.prompt != promptNone {
 			return m, m.updatePrompt(msg)
+		}
+		if m.mode == modePI {
+			return m.updatePIKeys(msg)
 		}
 
 		switch msg.String() {
 		case "ctrl+c":
-			if m.mode == modeOpencode {
-				return m, m.forwardOpencodeInputCmd(msg)
-			}
-			m.stopOpencode()
-			return m, tea.Quit
+			return m, m.quitCmd()
 		case "q":
 			if m.mode == modeProjects {
-				m.stopOpencode()
-				return m, tea.Quit
+				return m, m.quitCmd()
 			}
 		case "tab":
 			if m.mode == modeProjects && m.authStatus == githubauth.StatusAuth {
@@ -489,13 +537,38 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.reloadThemeItems()
 			m.openPrompt(promptTheme, "Theme", "j/k move, enter apply, esc cancel", "")
 			return m, nil
-		case "o":
-			if m.mode == modeOpencode {
+		case "i":
+			if m.mode == modePI {
 				return m, nil
 			}
-			m.mode = modeOpencode
-			m.opencode.Buffer = nil
-			return m, m.startOpencodeCmd()
+			if m.mode == modeProjects && m.picker == pickerRepos {
+				repo, ok := m.selectedRepo()
+				if ok {
+					if m.activeRepoName == repo.FullName && strings.TrimSpace(m.projectPath) != "" && bentodiffs.IsGitRepo(m.projectPath) {
+						m.mode = modePI
+						return m, m.startPiCmd()
+					}
+					m.pendingLaunch = "pi"
+					m.pendingRepoName = repo.FullName
+					m.statusMessage = "opening pi for " + repo.FullName
+					return m, m.openRepoCmd(repo)
+				}
+			}
+			if m.projectPath == "" {
+				if m.mode == modeProjects && m.picker == pickerRepos {
+					repo, ok := m.selectedRepo()
+					if ok {
+						m.pendingLaunch = "pi"
+						m.pendingRepoName = repo.FullName
+						m.statusMessage = "opening pi for " + repo.FullName
+						return m, m.openRepoCmd(repo)
+					}
+				}
+				m.showError("select a repository first")
+				return m, nil
+			}
+			m.mode = modePI
+			return m, m.startPiCmd()
 		case "D":
 			m.mode = modeDiff
 			m.ensureDiffViewer()
@@ -539,29 +612,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.refreshGitCmd()
 		case "p":
-			if m.mode == modeOpencode {
-				m.stopOpencode()
-			}
+			m.stopPi()
 			m.mode = modeProjects
 			return m, m.inputBox.Focus()
-		}
-
-		if m.mode == modeOpencode {
-			if msg.String() == "ctrl+g" {
-				if m.opencodeExitArmed {
-					m.stopOpencode()
-					m.mode = modeProjects
-					m.statusMessage = "opencode terminated"
-					return m, nil
-				}
-				m.opencodeExitArmed = true
-				m.opencodeExitSeq++
-				return m, m.opencodeExitArmTimeoutCmd(m.opencodeExitSeq)
-			}
-			if m.opencodeExitArmed {
-				m.opencodeExitArmed = false
-			}
-			return m, m.forwardOpencodeInputCmd(msg)
 		}
 
 		if m.mode == modeProjects {
@@ -586,10 +639,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.repoActionOpen {
 					switch msg.String() {
 					case "j", "down", "l", "right":
-						m.repoActionCursor = clamp(m.repoActionCursor+1, 0, 1)
+						m.repoActionCursor = clamp(m.repoActionCursor+1, 0, 2)
 						return m, nil
 					case "k", "up", "h", "left":
-						m.repoActionCursor = clamp(m.repoActionCursor-1, 0, 1)
+						m.repoActionCursor = clamp(m.repoActionCursor-1, 0, 2)
 						return m, nil
 					case "esc":
 						m.repoActionOpen = false
@@ -599,12 +652,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if !ok {
 							return m, nil
 						}
-						if m.repoActionCursor == 0 {
+						m.lastRepo = repo.FullName
+						m.pendingRepoName = repo.FullName
+						switch m.repoActionCursor {
+						case 0:
 							m.pendingLaunch = "diff"
 							m.statusMessage = "opening diff for " + repo.FullName
-						} else {
-							m.pendingLaunch = "opencode"
-							m.statusMessage = "opening opencode for " + repo.FullName
+						case 1:
+							m.pendingLaunch = "git"
+							m.statusMessage = "opening git for " + repo.FullName
+						default:
+							m.pendingLaunch = "pi"
+							m.statusMessage = "opening pi for " + repo.FullName
 						}
 						return m, m.openRepoCmd(repo)
 					}
@@ -618,6 +677,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "k", "up":
 					m.repoCursor = clamp(m.repoCursor-1, 0, max(0, len(m.repos)-1))
 					return m, nil
+				case "n":
+					m.openPrompt(promptNewProj, "New Project", "Enter folder path to create + git init", filepath.Join(m.localDir, "new-project"))
+					return m, m.promptInput.Focus()
 				case "r":
 					return m, m.loadReposCmd()
 				case "b":
@@ -710,6 +772,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.expandLocalSelection()
 					return m, nil
 				}
+			case "n":
+				m.openPrompt(promptNewProj, "New Project", "Enter folder path to create + git init", filepath.Join(m.localDir, "new-project"))
+				return m, m.promptInput.Focus()
 			}
 
 			if m.picker == pickerClone {
@@ -738,6 +803,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.diffViewer.NextFile()
 			case "N":
 				m.diffViewer.PrevFile()
+			case "c":
+				m.openPrompt(promptDiffRev, "View Commit Diff", "Enter commit sha/ref", "HEAD")
+				return m, m.promptInput.Focus()
 			case "}":
 				m.diffViewer.NextHunk()
 			case "{":
@@ -818,8 +886,8 @@ func (m *model) View() tea.View {
 			m.drawDiffView(bodySurf, width, height, t)
 		case modeGit:
 			m.drawGitView(bodySurf, width, height, t)
-		case modeOpencode:
-			m.drawOpencodeView(bodySurf, height, t)
+		case modePI:
+			m.drawPIView(bodySurf, height, t)
 		}
 		return bodySurf.Render()
 	})
@@ -980,12 +1048,12 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 	kbdW := lipgloss.Width(kbdStr)
 
 	dot := lipgloss.NewStyle().Foreground(t.Info()).Render(m.icons.Dot)
-	tipStr := dot + dim.Render("  terminal workspace. git + agent + diff.")
+	tipStr := dot + dim.Render("  terminal workspace. git + pi + diff.")
 	tipW := lipgloss.Width(tipStr)
 
 	status := ""
 	if m.projectPath != "" {
-		status = "project: " + m.projectPath
+		status = "project: " + m.currentRepoLabel()
 	}
 	if m.statusMessage != "" {
 		if status != "" {
@@ -1082,8 +1150,9 @@ func (m *model) drawRepoProjectsView(surf *surface.Surface, bodyH int, t theme.T
 			return st.Render(label)
 		}
 		diffItem := item(fmt.Sprintf("%s Diff", m.icons.Diff), m.repoActionCursor == 0)
-		opencodeItem := item(fmt.Sprintf("%s Opencode", m.icons.Opencode), m.repoActionCursor == 1)
-		barLine := diffItem + "   " + opencodeItem
+		gitItem := item(fmt.Sprintf("%s Git", m.icons.Git), m.repoActionCursor == 1)
+		piItem := item(fmt.Sprintf("%s Pi", m.icons.PI), m.repoActionCursor == 2)
+		barLine := diffItem + "   " + gitItem + "   " + piItem
 		barW := lipgloss.Width(barLine) + 2
 		actionBar = lipgloss.NewStyle().
 			Background(t.BackgroundPanel()).
@@ -1281,11 +1350,11 @@ func (m *model) drawGitView(surf *surface.Surface, bodyW, bodyH int, t theme.The
 	surf.Draw(0, 0, split)
 }
 
-func (m *model) drawOpencodeView(surf *surface.Surface, bodyH int, t theme.Theme) {
+func (m *model) drawPIView(surf *surface.Surface, bodyH int, t theme.Theme) {
 	if m.width <= 2 || bodyH <= 2 {
 		return
 	}
-	vw, vh := m.opencodeViewportSize()
+	vw, vh := m.piViewportSize()
 	b := lipgloss.RoundedBorder()
 	borderStyle := lipgloss.NewStyle().Foreground(t.BorderFocus())
 	top := borderStyle.Render(b.TopLeft + strings.Repeat(b.Top, vw) + b.TopRight)
@@ -1297,57 +1366,141 @@ func (m *model) drawOpencodeView(surf *surface.Surface, bodyH int, t theme.Theme
 	}
 	surf.Draw(0, vh+1, bottom)
 
-	lines := m.opencodeViewportLines(vw, vh)
-	for y, line := range lines {
-		surf.Draw(1, y+1, line)
+	headerRows := 1
+	inputRows := 5
+	slashRows := m.piui.SlashRows(8)
+	slashPanelH := 0
+	if m.piui.SlashActive() && len(slashRows) > 0 {
+		slashPanelH = min(len(slashRows)+1, 8)
 	}
-}
+	widgetH := 0
+	if len(m.piui.WidgetLines) > 0 {
+		widgetH = min(3, len(m.piui.WidgetLines))
+	}
+	historyH := max(1, vh-headerRows-inputRows-slashPanelH-widgetH)
+	if m.piui.Viewport.Width() != vw || m.piui.Viewport.Height() != historyH {
+		m.piui.Viewport.SetWidth(vw)
+		m.piui.Viewport.SetHeight(historyH)
+		m.refreshAgentViewport()
+	}
 
-func (m *model) opencodeViewportLines(cols, rows int) []string {
-	if cols <= 0 || rows <= 0 {
-		return nil
-	}
-	lines := make([]string, 0, rows)
-	if m.opencodeTerm == nil {
-		msg := "starting opencode..."
-		if m.opencode.Running {
-			msg = "connected, waiting for output..."
-		}
-		lines = append(lines, fitLine(msg, cols))
-		for len(lines) < rows {
-			lines = append(lines, "")
-		}
-		return lines
-	}
-	m.opencodeTerm.Lock()
-	defer m.opencodeTerm.Unlock()
+	repoLabel := m.currentRepoLabel()
+	headerRow := m.piui.HeaderLine(m.icons.PI, repoLabel, max(1, vw-2), t)
+	surf.Draw(1, 1, fitLine(headerRow, vw))
 
-	for y := 0; y < rows; y++ {
-		r := make([]rune, cols)
-		for x := 0; x < cols; x++ {
-			g := m.opencodeTerm.Cell(x, y)
-			ch := g.Char
-			if ch == 0 {
-				ch = ' '
+	view := strings.Split(m.piui.Viewport.View(), "\n")
+	historyStartY := 1 + headerRows
+	for y := 0; y < min(historyH, len(view)); y++ {
+		surf.Draw(1, historyStartY+y, fitLine(view[y], vw))
+	}
+
+	panelStartY := historyStartY + historyH
+	if widgetH > 0 {
+		for i := 0; i < widgetH; i++ {
+			line := ""
+			if i < len(m.piui.WidgetLines) {
+				line = m.piui.WidgetLines[i]
 			}
-			r[x] = ch
+			styled := lipgloss.NewStyle().
+				Background(t.BackgroundPanel()).
+				Foreground(t.TextMuted()).
+				PaddingLeft(1).
+				PaddingRight(1).
+				Width(max(1, vw-2)).
+				Render(fitLine(line, max(8, vw-4)))
+			surf.Draw(1, panelStartY+i, fitLine(styled, vw))
 		}
-		line := strings.TrimRight(string(r), " ")
-		lines = append(lines, fitLine(line, cols))
+		panelStartY += widgetH
 	}
-	return lines
+	if slashPanelH > 0 {
+		cmdW := clamp(vw/3, 14, 28)
+		for i := 0; i < min(len(slashRows), slashPanelH-1); i++ {
+			row := slashRows[i]
+			left := fitLine(row.Command, cmdW)
+			right := fitLine(row.Description, max(8, vw-cmdW-2))
+			line := left + strings.Repeat(" ", max(1, cmdW-lipgloss.Width(left)+2)) + right
+			style := lipgloss.NewStyle().
+				Background(t.BackgroundPanel()).
+				Foreground(t.TextMuted()).
+				PaddingLeft(1).
+				PaddingRight(1).
+				Width(max(1, vw-2))
+			if row.Selected {
+				style = style.Background(t.SelectionBG()).Foreground(t.SelectionFG()).Bold(true)
+			}
+			surf.Draw(1, panelStartY+i, fitLine(style.Render(line), vw))
+		}
+		hint := lipgloss.NewStyle().Foreground(t.TextMuted()).Render("tab autocomplete  enter run  esc close")
+		surf.Draw(1, panelStartY+slashPanelH-1, fitLine(hint, vw))
+	}
+
+	inputContent := viewString(m.piui.Input.View())
+
+	contentW := max(8, vw-2)
+	mkRow := func(content string) string {
+		return lipgloss.NewStyle().
+			Background(t.InputBG()).
+			Foreground(t.InputFG()).
+			PaddingLeft(1).
+			PaddingRight(1).
+			Width(contentW).
+			Render(content)
+	}
+	blank := lipgloss.NewStyle().Background(t.InputBG()).Width(contentW + 2).Render(" ")
+	inputBlock := lipgloss.JoinVertical(lipgloss.Left,
+		blank,
+		blank,
+		mkRow(inputContent),
+		blank,
+		blank,
+	)
+	inputBox := lipgloss.NewStyle().
+		Background(t.InputBG()).
+		Border(lipgloss.Border{Left: "┃"}, false, false, false, true).
+		BorderForeground(t.BorderFocus()).
+		Width(vw - 1).
+		Render(inputBlock)
+	inputStartY := panelStartY + slashPanelH
+	for i, line := range strings.Split(inputBox, "\n") {
+		y := inputStartY + i
+		if y > vh {
+			break
+		}
+		surf.Draw(1, y, fitLine(line, vw))
+	}
+
+	if m.piui.Modal.Active {
+		modalW := min(max(32, vw*2/3), vw-2)
+		modalH := min(max(6, len(m.piui.ModalLines(modalW-4))+4), vh-1)
+		offX := 1 + max(0, (vw-modalW)/2)
+		offY := 1 + max(0, (vh-modalH)/2)
+		mb := lipgloss.NormalBorder()
+		mStyle := lipgloss.NewStyle().Foreground(t.BorderFocus()).Background(t.BackgroundPanel())
+		topM := mStyle.Render(mb.TopLeft + strings.Repeat(mb.Top, modalW-2) + mb.TopRight)
+		surf.Draw(offX, offY, topM)
+		for y := 1; y < modalH-1; y++ {
+			surf.Draw(offX, offY+y, mStyle.Render(mb.Left)+strings.Repeat(" ", modalW-2)+mStyle.Render(mb.Right))
+		}
+		surf.Draw(offX, offY+modalH-1, mStyle.Render(mb.BottomLeft+strings.Repeat(mb.Bottom, modalW-2)+mb.BottomRight))
+		for i, line := range m.piui.ModalLines(modalW - 4) {
+			if i >= modalH-2 {
+				break
+			}
+			surf.Draw(offX+2, offY+1+i, fitLine(line, modalW-4))
+		}
+	}
 }
 
 func (m *model) syncFooter() {
 	cfg := vimstatus.Config{
 		Mode:      m.footerModeLabel(),
-		Branch:    "glib",
+		Branch:    m.footerRepoLabel(),
 		Context:   "",
 		ShowClock: true,
 	}
 
-	if m.projectPath != "" {
-		cfg.Branch = filepath.Base(m.projectPath)
+	if cfg.Branch == "" {
+		cfg.Branch = "glib"
 	}
 
 	switch m.mode {
@@ -1359,20 +1512,20 @@ func (m *model) syncFooter() {
 			if m.repoActionOpen {
 				cfg.Context = m.icons.Projects + " h/l choose  enter run  esc back"
 			} else {
-				cfg.Context = m.icons.Projects + " j/k move  enter actions  b backend  r refresh"
+				cfg.Context = m.icons.Projects + " j/k move  enter actions  b backend  n new  r refresh"
 			}
 			if len(m.repos) > 0 {
 				cfg.Position = fmt.Sprintf("%d/%d", min(len(m.repos), m.repoCursor+1), len(m.repos))
 			}
 			cfg.Scroll = string(m.workspaceKind)
 		} else {
-			cfg.Context = m.icons.Projects + " p projects  " + m.icons.Clone + " tab picker  " + m.icons.Quit + " q quit"
+			cfg.Context = m.icons.Projects + " p projects  " + m.icons.PI + " i pi  n new  " + m.icons.Clone + " tab picker  " + m.icons.Quit + " q quit"
 			if len(m.localRows) > 0 {
 				cfg.Position = fmt.Sprintf("%d/%d", min(len(m.localRows), m.localCursor+1), len(m.localRows))
 			}
 		}
 	case modeDiff:
-		cfg.Context = m.icons.Diff + " j/k scroll  n/N file  { } hunk  " + m.icons.Git + " g git"
+		cfg.Context = m.icons.Diff + " j/k scroll  n/N file  c commit  { } hunk  " + m.icons.Git + " g git"
 		if m.diffViewer != nil {
 			st := m.diffViewer.State()
 			cfg.Position = fmt.Sprintf("%d/%d", st.Scroll+1, st.MaxScroll+1)
@@ -1385,21 +1538,11 @@ func (m *model) syncFooter() {
 			cfg.Position = fmt.Sprintf("%d/%d", min(len(rows), m.git.Cursor+1), len(rows))
 		}
 		cfg.Scroll = fmt.Sprintf("+%d -%d", m.git.AddedTotal, m.git.DeletedTotal)
-	case modeOpencode:
-		if m.opencodeExitArmed {
-			cfg.Context = m.icons.Opencode + " press ctrl+g again to exit"
-		} else {
-			cfg.Context = m.icons.Opencode + " passthrough  ctrl+g ctrl+g exit"
-		}
-		if m.opencode.Running {
-			cfg.Scroll = "live"
-		} else {
-			cfg.Scroll = "starting"
-		}
-	}
-
-	if m.tunnelBanner != "" {
-		cfg.Context = m.tunnelBanner
+	case modePI:
+		st := m.piui.FooterState("", "")
+		cfg.Context = st.Context
+		cfg.Scroll = st.Scroll
+		cfg.Position = st.Position
 	}
 
 	m.footer.SetTheme(theme.CurrentTheme())
@@ -1414,8 +1557,8 @@ func (m *model) footerModeLabel() string {
 		return m.icons.Diff + " " + string(m.mode)
 	case modeGit:
 		return m.icons.Git + " " + string(m.mode)
-	case modeOpencode:
-		return m.icons.Opencode + " " + string(m.mode)
+	case modePI:
+		return "Pi"
 	default:
 		return string(m.mode)
 	}
@@ -1480,6 +1623,21 @@ func (m *model) updatePrompt(msg tea.KeyMsg) tea.Cmd {
 			path := m.pendingPath
 			m.pendingPath = ""
 			return m.discardFileCmd(path)
+		case promptNewProj:
+			m.closePrompt()
+			if val == "" {
+				m.showError("project path cannot be empty")
+				return nil
+			}
+			return m.initProjectCmd(val)
+		case promptDiffRev:
+			m.closePrompt()
+			if val == "" {
+				m.showError("commit sha/ref cannot be empty")
+				return nil
+			}
+			m.mode = modeDiff
+			return m.refreshDiffCmd("commit", val, "")
 		case promptError:
 			m.closePrompt()
 			return nil
@@ -1549,7 +1707,7 @@ func (m *model) bodyHeight() int {
 	return max(0, m.height-1)
 }
 
-func (m *model) opencodeViewportSize() (int, int) {
+func (m *model) piViewportSize() (int, int) {
 	return max(1, m.width-2), max(1, m.bodyHeight()-2)
 }
 
@@ -1622,6 +1780,7 @@ func (m *model) activateLocalSelection() {
 		}
 		if bentodiffs.IsGitRepo(row.Path) {
 			m.projectPath = row.Path
+			m.activeRepoName = inferRepoNameFromPath(row.Path)
 			m.addRecent(row.Path)
 			m.statusMessage = "project selected"
 			return
@@ -1632,6 +1791,7 @@ func (m *model) activateLocalSelection() {
 	}
 	if bentodiffs.IsGitRepo(m.localDir) {
 		m.projectPath = m.localDir
+		m.activeRepoName = inferRepoNameFromPath(m.localDir)
 		m.addRecent(m.localDir)
 		m.statusMessage = "project selected"
 	}
@@ -1728,7 +1888,7 @@ func resolveIcons() iconSet {
 		Clone:    "[C]",
 		Root:     "[R]",
 		Dot:      "*",
-		Opencode: "[O]",
+		PI:       "π",
 		Diff:     "[D]",
 		Git:      "[G]",
 		Quit:     "[Q]",
@@ -1739,7 +1899,7 @@ func resolveIcons() iconSet {
 		Clone:    "\ueb3e", // nf-cod-repo_clone
 		Root:     "\ueb46", // nf-cod-root_folder
 		Dot:      "\uea71", // nf-cod-circle_filled
-		Opencode: "\uea85", // nf-cod-terminal
+		PI:       "π",
 		Diff:     "\ueae1", // nf-cod-diff
 		Git:      "\uea68", // nf-cod-source_control
 		Quit:     "\uea76", // nf-cod-close
@@ -1980,16 +2140,24 @@ func (m *model) refreshDiffCmd(source, commitSHA, selectedPath string) tea.Cmd {
 		args := []string{}
 		switch source {
 		case "working":
-			args = []string{"diff"}
+			working, _, wErr := bentodiffs.RunGit(m.projectPath, "diff")
+			if wErr != nil {
+				return diffRefreshMsg{Err: wErr}
+			}
+			staged, _, sErr := bentodiffs.RunGit(m.projectPath, "diff", "--cached")
+			if sErr != nil {
+				return diffRefreshMsg{Err: sErr}
+			}
+			out = strings.TrimSpace(strings.Join([]string{working, staged}, "\n"))
 		case "commit":
 			args = []string{"show", commitSHA, "--"}
 		default:
 			err = fmt.Errorf("unknown diff source")
 		}
-		if selectedPath != "" {
+		if selectedPath != "" && source != "working" {
 			args = append(args, "--", selectedPath)
 		}
-		if err == nil {
+		if err == nil && out == "" {
 			out, _, err = bentodiffs.RunGit(m.projectPath, args...)
 		}
 		if err != nil {
@@ -2127,6 +2295,25 @@ func (m *model) cloneRepoCmd(url, dest string) tea.Cmd {
 	}
 }
 
+func (m *model) initProjectCmd(dest string) tea.Cmd {
+	return func() tea.Msg {
+		if strings.TrimSpace(dest) == "" {
+			return cloneDoneMsg{Err: fmt.Errorf("project path cannot be empty")}
+		}
+		abs, err := filepath.Abs(dest)
+		if err != nil {
+			return cloneDoneMsg{Err: err}
+		}
+		if err := os.MkdirAll(abs, 0o755); err != nil {
+			return cloneDoneMsg{Err: err}
+		}
+		if _, _, err := bentodiffs.RunGit(abs, "init"); err != nil {
+			return cloneDoneMsg{Err: err}
+		}
+		return cloneDoneMsg{ProjectPath: abs}
+	}
+}
+
 func (m *model) ensureDiffViewer() {
 	if m.diffViewer == nil {
 		m.diffViewer = bdcore.NewViewer(bdcore.ViewerOptions{
@@ -2152,53 +2339,482 @@ func diffFileIndexByPath(diffs []bdcore.DiffResult, selectedPath string) int {
 	return 0
 }
 
-func (m *model) startOpencodeCmd() tea.Cmd {
+func (m *model) startPiCmd() tea.Cmd {
 	targetDir := m.projectPath
-	if targetDir == "" {
-		targetDir = m.localDir
-	}
-	return func() tea.Msg {
-		state, err := opencode.Start(targetDir)
-		if err != nil {
-			return opencodeStartMsg{Err: err}
+	if strings.TrimSpace(targetDir) == "" {
+		return func() tea.Msg {
+			return piStartMsg{Err: fmt.Errorf("no selected repository")}
 		}
-		return opencodeStartMsg{State: state}
-	}
-}
-
-func (m *model) readOpencodeChunkCmd() tea.Cmd {
-	if !m.opencode.Running {
-		return nil
 	}
 	return func() tea.Msg {
-		buf, err := m.opencode.ReadChunk()
+		proc, err := pi.Start(targetDir)
 		if err != nil {
-			return opencodeChunkMsg{Err: err}
+			return piStartMsg{Err: err}
 		}
-		return opencodeChunkMsg{Data: buf}
+		return piStartMsg{Proc: proc}
 	}
 }
 
-func (m *model) forwardOpencodeInputCmd(k tea.KeyMsg) tea.Cmd {
-	if !m.opencode.Running {
+func (m *model) readPiEventCmd() tea.Cmd {
+	if m.piProc == nil || !m.piProc.Running() {
 		return nil
 	}
+	return m.piProc.ReadLoop()
+}
+
+func (m *model) sendPiCmd(payload any) tea.Cmd {
 	return func() tea.Msg {
-		m.opencode.ForwardInput(k)
+		if m.piProc == nil {
+			return piSendMsg{Err: fmt.Errorf("pi not running")}
+		}
+		return piSendMsg{Err: m.piProc.Send(payload)}
+	}
+}
+
+func (m *model) stopPi() {
+	if m.piProc == nil {
+		return
+	}
+	m.piProc.Stop()
+	m.piProc = nil
+}
+
+func (m *model) quitCmd() tea.Cmd {
+	m.stopPi()
+	if m.workspace != nil {
+		m.quitting = true
+		return func() tea.Msg {
+			return workspaceCleanupMsg{Result: m.workspace.CleanupEphemeral()}
+		}
+	}
+	return tea.Quit
+}
+
+func (m *model) refreshAgentViewport() {
+	m.piui.Refresh(theme.CurrentTheme())
+}
+
+func (m *model) updatePIKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.piui.Modal.Active {
+		return m.handlePIModalKeys(msg)
+	}
+
+	if m.piui.CmdPrefix {
+		m.piui.CmdPrefix = false
+		switch msg.String() {
+		case "p":
+			m.stopPi()
+			m.mode = modeProjects
+			return m, m.inputBox.Focus()
+		case "d":
+			m.stopPi()
+			m.mode = modeDiff
+			return m, m.refreshDiffCmd("", "", "")
+		case "g":
+			m.stopPi()
+			m.mode = modeGit
+			return m, m.refreshGitCmd()
+		case "j":
+			m.piui.ScrollDown()
+			return m, nil
+		case "k":
+			m.piui.ScrollUp()
+			return m, nil
+		case "ctrl+d":
+			m.piui.HalfPageDown()
+			return m, nil
+		case "u":
+			m.piui.HalfPageUp()
+			return m, nil
+		case "n":
+			return m, m.sendPiCmd(pi.CmdNewSession())
+		case "m":
+			return m, m.sendPiCmd(pi.CmdCycleModel())
+		case "G":
+			m.piui.GotoBottom()
+			return m, nil
+		}
+	}
+
+	if m.piui.SlashActive() {
+		switch msg.String() {
+		case "up", "k":
+			m.piui.MoveSlashCursor(-1)
+			return m, nil
+		case "down", "j":
+			m.piui.MoveSlashCursor(1)
+			return m, nil
+		case "tab":
+			if m.piui.AutocompleteSlashInput() {
+				m.refreshAgentViewport()
+			}
+			return m, nil
+		case "enter":
+			// handled in general enter flow below
+		}
+	}
+
+	switch msg.String() {
+	case "ctrl+c":
+		return m, m.quitCmd()
+	case "ctrl+g":
+		m.piui.CmdPrefix = true
+		return m, nil
+	case "ctrl+o":
+		m.piui.ToggleToolBody()
+		m.refreshAgentViewport()
+		return m, nil
+	case "ctrl+t":
+		m.piui.ToggleThinking()
+		m.refreshAgentViewport()
+		return m, nil
+	case "esc":
+		if m.piui.SlashActive() {
+			m.piui.Input.SetValue("")
+			m.piui.UpdateSlashQuery("")
+			return m, nil
+		}
+		if m.piui.Streaming {
+			m.piui.Status = "aborting"
+			return m, m.sendPiCmd(pi.CmdAbort())
+		}
+		m.stopPi()
+		m.mode = modeProjects
+		return m, m.inputBox.Focus()
+	case "s":
+		if m.piui.Streaming {
+			m.piui.SteerMode = true
+			m.piui.Input.SetPlaceholder("Steer message...")
+			return m, nil
+		}
+	case "enter":
+		v := strings.TrimSpace(m.piui.Input.Value())
+		if v == "" {
+			return m, nil
+		}
+		if m.piui.SlashActive() {
+			if selected, ok := m.piui.SelectedSlashCommand(); ok {
+				if v == "/" || !m.piui.HasExactSlashCommand(v) {
+					v = selected.Name
+				}
+			}
+		}
+		m.piui.GotoBottom()
+		m.piui.Input.SetValue("")
+		m.piui.UpdateSlashQuery("")
+		m.piui.AppendUserMessage(v)
+		m.refreshAgentViewport()
+		if handled, cmd := m.handleSlashCommand(v); handled {
+			return m, cmd
+		}
+		if m.piui.Streaming && !m.piui.SteerMode {
+			if strings.HasPrefix(v, "/") {
+				return m, m.sendPiCmd(pi.CmdPromptWithStreamingBehavior(v, "steer"))
+			}
+			return m, m.sendPiCmd(pi.CmdSteer(v))
+		}
+		if m.piui.SteerMode {
+			m.piui.SteerMode = false
+			m.piui.Input.SetPlaceholder("Message pi...")
+			return m, m.sendPiCmd(pi.CmdSteer(v))
+		}
+		m.piui.StartStreaming()
+		return m, m.sendPiCmd(pi.CmdPrompt(v))
+	}
+
+	u, cmd := m.piui.Input.Update(msg)
+	m.piui.Input = u.(*input.Model)
+	m.piui.UpdateSlashQuery(m.piui.Input.Value())
+	if m.piui.SlashActive() && len(m.piui.Commands) == 0 {
+		return m, tea.Batch(cmd, m.sendPiCmd(map[string]any{"type": "get_commands"}))
+	}
+	return m, cmd
+}
+
+func (m *model) handlePIModalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	modal := m.piui.Modal
+	if !modal.Active {
+		return m, nil
+	}
+	respond := func(payload map[string]any) (tea.Model, tea.Cmd) {
+		cmdPayload, err := pi.CmdExtensionUIResponse(modal.RequestID, payload)
+		m.piui.CloseModal()
+		if err != nil {
+			m.showError(err.Error())
+			return m, nil
+		}
+		return m, m.sendPiCmd(cmdPayload)
+	}
+
+	switch msg.String() {
+	case "esc":
+		return respond(map[string]any{"cancelled": true})
+	}
+
+	switch modal.Method {
+	case "select":
+		if len(m.piui.Modal.Options) == 0 {
+			if msg.String() == "enter" {
+				return respond(map[string]any{"cancelled": true})
+			}
+			return m, nil
+		}
+		switch msg.String() {
+		case "j", "down":
+			m.piui.Modal.Cursor = clamp(m.piui.Modal.Cursor+1, 0, len(m.piui.Modal.Options)-1)
+			return m, nil
+		case "k", "up":
+			m.piui.Modal.Cursor = clamp(m.piui.Modal.Cursor-1, 0, len(m.piui.Modal.Options)-1)
+			return m, nil
+		case "enter":
+			if len(m.piui.Modal.Options) == 0 {
+				return respond(map[string]any{"cancelled": true})
+			}
+			return respond(map[string]any{"value": m.piui.Modal.Options[m.piui.Modal.Cursor]})
+		}
+	case "confirm":
+		switch msg.String() {
+		case "y", "enter":
+			return respond(map[string]any{"confirmed": true})
+		case "n":
+			return respond(map[string]any{"confirmed": false})
+		}
+	case "input", "editor":
+		if msg.String() == "enter" {
+			val := m.piui.Input.Value()
+			m.piui.Input.SetValue("")
+			return respond(map[string]any{"value": val})
+		}
+		u, cmd := m.piui.Input.Update(msg)
+		m.piui.Input = u.(*input.Model)
+		return m, cmd
+	default:
+		if msg.String() == "enter" {
+			return respond(map[string]any{"cancelled": true})
+		}
+	}
+
+	return m, nil
+}
+
+func (m *model) handlePiEvent(evt pi.PiEventMsg) tea.Cmd {
+	m.piui.HandleEvent(evt)
+	switch evt.Type {
+	case "agent_end", "turn_end":
+		return tea.Batch(
+			m.sendPiCmd(pi.CmdGetState()),
+			m.sendPiCmd(map[string]any{"type": "get_session_stats"}),
+		)
+	default:
 		return nil
 	}
 }
 
-func (m *model) opencodeExitArmTimeoutCmd(seq int) tea.Cmd {
-	return tea.Tick(1500*time.Millisecond, func(time.Time) tea.Msg {
-		return opencodeExitArmTimeoutMsg{Seq: seq}
-	})
+func (m *model) handleSlashCommand(input string) (bool, tea.Cmd) {
+	input = strings.TrimSpace(input)
+	if !strings.HasPrefix(input, "/") {
+		return false, nil
+	}
+	parts := strings.Fields(input)
+	if len(parts) == 0 {
+		return false, nil
+	}
+	name := strings.ToLower(strings.TrimSpace(parts[0]))
+	makeTracked := func(cmdName string, payload map[string]any) tea.Cmd {
+		id := m.nextSlashID()
+		payload["id"] = id
+		m.pendingSlash[id] = cmdName
+		return m.sendPiCmd(payload)
+	}
+
+	switch name {
+	case "/models":
+		return true, makeTracked(name, map[string]any{"type": "get_available_models"})
+	case "/state":
+		return true, makeTracked(name, pi.CmdGetState())
+	case "/stats":
+		return true, makeTracked(name, map[string]any{"type": "get_session_stats"})
+	case "/commands":
+		return true, makeTracked(name, map[string]any{"type": "get_commands"})
+	default:
+		return false, nil
+	}
 }
 
-func (m *model) stopOpencode() {
-	m.opencodeExitArmed = false
-	m.opencodeTerm = nil
-	m.opencode.Stop()
+func (m *model) nextSlashID() string {
+	m.slashSeq++
+	return fmt.Sprintf("slash-%d", m.slashSeq)
+}
+
+func (m *model) appendSlashResponse(cmd string, msg pi.PiResponseMsg) {
+	if !msg.Success {
+		errText := strings.TrimSpace(msg.Error)
+		if errText == "" {
+			errText = "command failed"
+		}
+		m.piui.Messages = append(m.piui.Messages, piui.Message{Role: piui.RoleAssistant, Text: errText})
+		return
+	}
+	var text string
+	switch cmd {
+	case "/models":
+		text = formatModelsText(msg.Data)
+	case "/state":
+		text = formatStateText(msg.Data)
+	case "/stats":
+		text = formatStatsText(msg.Data)
+	case "/commands":
+		text = formatCommandsText(msg.Data)
+	default:
+		text = "ok"
+	}
+	if strings.TrimSpace(text) == "" {
+		text = "ok"
+	}
+	m.piui.Messages = append(m.piui.Messages, piui.Message{Role: piui.RoleAssistant, Text: text})
+}
+
+func formatModelsText(data map[string]any) string {
+	if data == nil {
+		return "No models returned."
+	}
+	raw, _ := data["models"].([]any)
+	if len(raw) == 0 {
+		return "No models available."
+	}
+	lines := make([]string, 0, min(len(raw), 12)+1)
+	lines = append(lines, "Available models:")
+	for i, item := range raw {
+		if i >= 12 {
+			lines = append(lines, "...")
+			break
+		}
+		m, _ := item.(map[string]any)
+		id, _ := m["id"].(string)
+		provider, _ := m["provider"].(string)
+		name, _ := m["name"].(string)
+		label := strings.TrimSpace(name)
+		if label == "" {
+			label = strings.TrimSpace(id)
+		}
+		if provider != "" {
+			lines = append(lines, fmt.Sprintf("- %s (%s)", label, provider))
+		} else {
+			lines = append(lines, "- "+label)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatStateText(data map[string]any) string {
+	if data == nil {
+		return "No state available."
+	}
+	parts := []string{"Session state:"}
+	if model, ok := data["model"].(map[string]any); ok {
+		name, _ := model["name"].(string)
+		id, _ := model["id"].(string)
+		if name != "" {
+			parts = append(parts, "- model: "+name)
+		} else if id != "" {
+			parts = append(parts, "- model: "+id)
+		}
+	}
+	if tl, _ := data["thinkingLevel"].(string); tl != "" {
+		parts = append(parts, "- thinking: "+tl)
+	}
+	if sid, _ := data["sessionId"].(string); sid != "" {
+		parts = append(parts, "- session: "+sid)
+	}
+	if pc, ok := data["pendingMessageCount"].(float64); ok {
+		parts = append(parts, fmt.Sprintf("- pending: %d", int(pc)))
+	}
+	return strings.Join(parts, "\n")
+}
+
+func formatStatsText(data map[string]any) string {
+	if data == nil {
+		return "No stats available."
+	}
+	parts := []string{"Session stats:"}
+	if tokens, ok := data["tokens"].(map[string]any); ok {
+		if total, ok := tokens["total"].(float64); ok {
+			parts = append(parts, fmt.Sprintf("- tokens: %d", int(total)))
+		}
+	}
+	if cost, ok := data["cost"].(float64); ok {
+		parts = append(parts, fmt.Sprintf("- cost: $%.4f", cost))
+	}
+	if toolCalls, ok := data["toolCalls"].(float64); ok {
+		parts = append(parts, fmt.Sprintf("- tool calls: %d", int(toolCalls)))
+	}
+	return strings.Join(parts, "\n")
+}
+
+func formatCommandsText(data map[string]any) string {
+	if data == nil {
+		return "No commands available."
+	}
+	raw, _ := data["commands"].([]any)
+	if len(raw) == 0 {
+		return "No commands available."
+	}
+	parts := []string{"Commands:"}
+	for i, item := range raw {
+		if i >= 20 {
+			parts = append(parts, "...")
+			break
+		}
+		m, _ := item.(map[string]any)
+		name, _ := m["name"].(string)
+		desc, _ := m["description"].(string)
+		if name == "" {
+			continue
+		}
+		if !strings.HasPrefix(name, "/") {
+			name = "/" + name
+		}
+		if strings.TrimSpace(desc) != "" {
+			parts = append(parts, fmt.Sprintf("- %s  %s", name, desc))
+		} else {
+			parts = append(parts, "- "+name)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func (m *model) orderRepos(repos []githubauth.Repo) []githubauth.Repo {
+	out := make([]githubauth.Repo, 0, len(repos))
+	if m.lastRepo != "" {
+		for _, r := range repos {
+			if r.FullName == m.lastRepo {
+				out = append(out, r)
+				break
+			}
+		}
+	}
+	for _, r := range repos {
+		if r.FullName == m.lastRepo {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+func (m *model) lastRepoIndex() int {
+	if len(m.repos) == 0 {
+		return 0
+	}
+	if m.lastRepo == "" {
+		return clamp(m.repoCursor, 0, len(m.repos)-1)
+	}
+	for i, r := range m.repos {
+		if r.FullName == m.lastRepo {
+			return i
+		}
+	}
+	return clamp(m.repoCursor, 0, len(m.repos)-1)
 }
 
 func (m *model) reloadThemeItems() {
@@ -2247,6 +2863,48 @@ func (m *model) addRecent(path string) {
 		}
 	}
 	m.recent = next
+}
+
+func (m *model) currentRepoLabel() string {
+	if name := strings.TrimSpace(m.activeRepoName); name != "" {
+		return name
+	}
+	if m.projectPath != "" {
+		return inferRepoNameFromPath(m.projectPath)
+	}
+	return "no repository"
+}
+
+func (m *model) footerRepoLabel() string {
+	name := m.currentRepoLabel()
+	if name == "" || name == "no repository" {
+		return "glib"
+	}
+	return m.icons.Git + " " + name
+}
+
+func inferRepoNameFromPath(path string) string {
+	clean := filepath.Clean(strings.TrimSpace(path))
+	if clean == "" {
+		return ""
+	}
+	parts := strings.Split(clean, string(filepath.Separator))
+	for _, part := range parts {
+		if strings.Contains(part, "__") {
+			return strings.Replace(part, "__", "/", 1)
+		}
+	}
+	base := filepath.Base(clean)
+	if base == "main" || base == "base" || base == "worktrees" {
+		parent := filepath.Base(filepath.Dir(clean))
+		if parent != "." && parent != string(filepath.Separator) {
+			if strings.Contains(parent, "__") {
+				return strings.Replace(parent, "__", "/", 1)
+			}
+			return parent
+		}
+	}
+	return base
 }
 
 type staticTextModel struct {

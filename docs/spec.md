@@ -2,7 +2,7 @@
 
 Type: terminal workspace app (BentoTUI)
 Stack: Go, Bubble Tea v2, Lipgloss v2, BentoTUI, bento-diffs
-Positioning: one terminal shell for repo selection, git operations, diff review, and agent handoff.
+Positioning: one terminal shell for repo selection, git operations, diff review, and pi handoff.
 
 ## Product Principles
 
@@ -13,7 +13,7 @@ Positioning: one terminal shell for repo selection, git operations, diff review,
 
 ## Product Goals
 
-- Reduce context switching between repo selection, git commands, diff inspection, and agent use.
+- Reduce context switching between repo selection, git commands, diff inspection, and pi use.
 - Keep visual quality of diff review high by embedding `bento-diffs` directly.
 - Support multiple execution environments (local dev, remote VPS, containers, sandbox sessions).
 - Keep keyboard-first ergonomics with predictable mode transitions.
@@ -31,7 +31,7 @@ Positioning: one terminal shell for repo selection, git operations, diff review,
 - `PROJECTS`: repository picker + backend selection
 - `GIT`: repo status/stage/commit/push workflow
 - `DIFF`: embedded diff viewer workflow
-- `OPENCODE`: subprocess tunnel to opencode CLI
+- `PI`: subprocess RPC chat via pi
 
 Footer ownership is global: `glib` owns the bottom row in every mode.
 
@@ -40,7 +40,7 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 - Launch `glib` and authenticate from the projects/home input area.
 - Pick a repository from `PROJECTS` and materialize it via selected backend.
 - Inspect and edit state in `GIT`, open contextual file diffs in `DIFF`.
-- Hand off to `OPENCODE` and return to the same workspace context.
+- Hand off to `PI` and return to the same workspace context.
 
 ## Auth Contract (embedded in `PROJECTS`)
 
@@ -55,19 +55,21 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 ## Projects Contract (`p`)
 
 - Source of truth is authenticated GitHub repo list.
+- Repo ordering follows recent activity; last selected repo is pinned first and focused.
 - Navigation supports cursor movement and explicit refresh.
 - Repo list viewport is fixed to 5 visible rows with scroll window behavior.
 - `enter` on repo opens an action chooser rendered below the repo card.
 - Action chooser is a compact horizontal bar rendered below the repo card.
 - Action chooser options:
   - `Diff`: materialize repo, then route to `DIFF` mode
-  - `Opencode`: materialize repo, then route to `OPENCODE` mode
+  - `Git`: materialize repo, then route to `GIT` mode
+  - `Pi`: materialize repo, then route to `PI` mode
 - `esc` closes action chooser and returns focus to repo list.
 - Backend is switchable in-mode:
   - `local`: persisted checkout root (`GLIB_WORKSPACE_ROOT` or `~/glib-workspaces`)
-  - `ephemeral`: temp clone per open action
-- Implementation status: ephemeral backend currently materializes full temp clones and does not yet use `git worktree`.
-- Project selection sets active repository context for `GIT`, `DIFF`, and `OPENCODE`.
+  - `ephemeral`: cached base clone + session worktree per open action
+- Ephemeral cleanup runs on app quit and skips dirty worktrees.
+- Project selection sets active repository context for `GIT`, `DIFF`, and `PI`.
 
 ## Distribution Contract
 
@@ -88,18 +90,25 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 - Rendering/navigation uses embedded `bento-diffs` viewer.
 - Viewer footer is hidden; app footer remains visible.
 - ANSI diff output must be preserved (no ANSI-stripping wrappers around viewer render).
+- `c` opens a commit/revision prompt to load a commit diff (`git show <rev>`).
 
-## Opencode Contract (`o`)
+## PI Contract (`i`)
 
-- Starts `opencode` process in active project directory.
-- Streams process output directly in glib body region (no nested opencode frame).
-- Body region is wrapped by a thin focus ring viewport while glib footer remains global.
-- Forwards keyboard input to subprocess by default.
-- Exit contract: `ctrl+g` then `ctrl+g` terminates process and returns to `PROJECTS`.
+- Starts `pi --mode rpc --cwd <repo>` in active project directory.
+- PI transport uses strict JSONL (`\n` delimiter) and a single stdout reader goroutine.
+- Renders streaming assistant text and tool blocks in glib body region.
+- Input-first keymap: typing goes to input; `ctrl+g` prefixes command shortcuts while focused.
+- Prefix shortcuts include mode jumps (`p`/`d`/`g`/`i`), session/model (`n`/`m`), and viewport follow/scroll (`G`/`j`/`k`).
+- `ctrl+o` toggles inline tool output expansion, `ctrl+t` toggles thinking visibility.
+- `esc` aborts while streaming, otherwise returns to `PROJECTS`.
+- Extension dialog requests (`extension_ui_request`) render as in-ring modals and respond with `extension_ui_response`.
+- Footer shows calm braille spinner only while PI is actively working (thinking/tool/retry/compaction).
 
 ## Architecture Boundaries
 
 - `internal/app`: mode state machine, key routing, shell rendering.
+- `internal/pi`: pi process lifecycle + RPC protocol + JSONL transport.
+- `internal/piui`: PI chat session state, rendering, modal dialogs, footer status/spinner.
 - `internal/bentodiffs`: grouped git+diff domain state and git operations.
 - `internal/githubauth`: OAuth device flow + repo API + token persistence.
 - `internal/workspace`: backend abstraction for local vs ephemeral repo materialization.

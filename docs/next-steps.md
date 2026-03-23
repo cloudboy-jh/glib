@@ -9,13 +9,13 @@
   - search/filter by owner/name
   - pagination for large accounts/orgs
   - clear state badges for local vs ephemeral materialization
-- Add smoke tests for core path: `PROJECTS(sign-in) -> repo action chooser -> DIFF/GIT/OPENCODE`.
+- Add smoke tests for core path: `PROJECTS(sign-in) -> repo action chooser -> DIFF/GIT/PI`.
 
 ## Quality and Reliability
 
 - Add tests around diff source selection (`working` vs `commit`) and selected-path mapping.
 - Add snapshot-style checks for ANSI preservation in embedded diff rendering.
-- Harden opencode tunnel lifecycle for abrupt PTY/process termination.
+- Harden pi RPC lifecycle for abrupt process termination.
 - Add backend tests for `local` and `ephemeral` workspace behavior.
 
 ## 1.0 Release Gate
@@ -36,4 +36,4 @@
 
 - `README.md`: product framing, install/run, key workflows.
 - `docs/spec.md`: contracts, boundaries, runtime behavior.
-- `docs/opencode.md`: Bento-first UI/layout rules.
+- `architecture-update.md`: PI implementation plan and keymap notes.
