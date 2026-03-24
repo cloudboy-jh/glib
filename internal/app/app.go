@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -246,6 +247,7 @@ type model struct {
 	quitting         bool
 	pendingSlash     map[string]string
 	slashSeq         int
+	reposLoading     bool
 	gitView          gitViewMode
 	gitBranches      []string
 	gitCurrentBranch string
@@ -550,6 +552,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.persistTokenCmd(msg.Token), m.loadReposCmd())
 
 	case reposMsg:
+		m.reposLoading = false
 		if msg.Err != nil {
 			m.showError(msg.Err.Error())
 			return m, nil
@@ -852,10 +855,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				switch msg.String() {
 				case "j", "down":
-					m.repoCursor = clamp(m.repoCursor+1, 0, max(0, len(m.repos)-1))
+					m.repoCursor = clamp(m.repoCursor+1, 0, max(0, m.repoDisplayLen()-1))
 					return m, nil
 				case "k", "up":
-					m.repoCursor = clamp(m.repoCursor-1, 0, max(0, len(m.repos)-1))
+					m.repoCursor = clamp(m.repoCursor-1, 0, max(0, m.repoDisplayLen()-1))
 					return m, nil
 				case "n":
 					m.openPrompt(promptNewProj, "New Project", "Enter folder path to create + git init", filepath.Join(m.localDir, "new-project"))
@@ -968,26 +971,25 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeDiff {
 			if m.diffView == diffViewHistory {
 				switch msg.String() {
-				case "esc", "q":
-					m.mode = modeProjects
-					return m, nil
+				case "j", "down":
+					m.diffHistoryCur = clamp(m.diffHistoryCur+1, 0, max(0, len(m.diffHistory)-1))
+				case "k", "up":
+					m.diffHistoryCur = clamp(m.diffHistoryCur-1, 0, max(0, len(m.diffHistory)-1))
 				case "c":
 					m.diffView = diffViewOpen
 					return m, m.refreshDiffCmd("", "", "")
 				case "enter":
-					sel, ok := m.commitPicker.Selected()
-					if ok {
-						sha := strings.TrimSpace(sel.Value)
+					if len(m.diffHistory) > 0 {
+						sha := strings.TrimSpace(m.diffHistory[m.diffHistoryCur].Hash)
 						if sha != "" {
 							m.diffView = diffViewOpen
 							return m, m.refreshDiffCmd("commit", sha, "")
 						}
 					}
-					return m, nil
+				case "esc", "q":
+					m.mode = modeProjects
 				}
-				u, cmd := m.commitPicker.Update(msg)
-				m.commitPicker = u.(*selectx.Model)
-				return m, cmd
+				return m, nil
 			}
 
 			if m.diffViewer == nil {
@@ -1372,32 +1374,81 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 	}
 }
 
+var repoLoadingMessages = []string{
+	"loading repos…",
+	"fetching from GitHub…",
+	"expanding workspace…",
+	"organizing list…",
+	"almost there…",
+}
+
 func (m *model) drawRepoProjectsView(surf *surface.Surface, bodyH int, t theme.Theme, dim, bright lipgloss.Style) {
 	contentW := m.projectsContentWidth()
 	lines := make([]string, 0, 5)
-	if len(m.repos) == 0 {
-		lines = append(lines, lipgloss.NewStyle().Foreground(t.TextMuted()).Render("No repositories loaded. Press r to refresh."))
+	if m.reposLoading {
+		idx := (int(time.Now().UnixMilli()/600) % len(repoLoadingMessages))
+		msg := repoLoadingMessages[idx]
+		lines = append(lines, lipgloss.NewStyle().Foreground(t.TextMuted()).Render(msg))
+		for len(lines) < 5 {
+			lines = append(lines, "")
+		}
+	} else if len(m.repos) == 0 {
+		lines = append(lines, lipgloss.NewStyle().Foreground(t.TextMuted()).Render("No repositories found. Press r to refresh."))
+		for len(lines) < 5 {
+			lines = append(lines, "")
+		}
 	} else {
+		// Build display list: synthetic "last" entry at index -1 followed by real repos
+		type repoRow struct {
+			label   string
+			repoIdx int // -1 = last-repo sentinel
+			isSynth bool
+		}
+		displayRows := make([]repoRow, 0, len(m.repos)+1)
+		if m.lastRepo != "" && len(m.repos) > 0 {
+			displayRows = append(displayRows, repoRow{
+				label:   m.lastRepo,
+				repoIdx: 0, // first in ordered list (orderRepos pins lastRepo first)
+				isSynth: true,
+			})
+		}
+		for i, r := range m.repos {
+			displayRows = append(displayRows, repoRow{label: r.FullName, repoIdx: i})
+		}
+
+		total := len(displayRows)
 		listH := 5
-		start := windowStart(m.repoCursor, listH, len(m.repos))
-		end := min(len(m.repos), start+listH)
+		start := windowStart(m.repoCursor, listH, total)
+		end := min(total, start+listH)
 		base := lipgloss.NewStyle().Width(contentW).Background(t.BackgroundPanel()).Foreground(t.Text())
 		active := base.Copy().Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Bold(true)
+		synthStyle := base.Copy().Foreground(t.TextAccent())
+		activeSynth := active.Copy()
 		for i := start; i < end; i++ {
+			row := displayRows[i]
 			prefix := "  "
 			marker := "  "
 			style := base
+			if row.isSynth {
+				style = synthStyle
+			}
 			if i == m.repoCursor {
 				prefix = "> "
-				style = active
+				if row.isSynth {
+					style = activeSynth
+				} else {
+					style = active
+				}
 			}
 			if i == start && start > 0 {
 				marker = "^ "
-			} else if i == end-1 && end < len(m.repos) {
+			} else if i == end-1 && end < total {
 				marker = "v "
 			}
-			name := m.repos[i].FullName
-			if m.repos[i].Private {
+			name := row.label
+			if row.isSynth {
+				name = "↩ " + row.label
+			} else if m.repos[row.repoIdx].Private {
 				name += " (private)"
 			}
 			lines = append(lines, style.Render(fitLine(marker+prefix+name, contentW)))
@@ -1479,8 +1530,65 @@ func (m *model) drawDiffView(surf *surface.Surface, bodyW, bodyH int, t theme.Th
 		return
 	}
 	if m.diffView == diffViewHistory {
-		m.commitPicker.SetSize(bodyW, bodyH)
-		surf.Draw(0, 0, viewString(m.commitPicker.View()))
+		contentW := max(8, bodyW-2)
+		listH := 5
+		commits := m.diffHistory
+		total := len(commits)
+		cur := clamp(m.diffHistoryCur, 0, max(0, total-1))
+
+		header := lipgloss.NewStyle().Bold(true).Foreground(t.TextAccent()).Render("Commit history")
+		meta := lipgloss.NewStyle().Foreground(t.TextMuted()).Render(fmt.Sprintf("%d commits", total))
+
+		lines := make([]string, 0, listH)
+		if total == 0 {
+			lines = append(lines, lipgloss.NewStyle().Foreground(t.TextMuted()).Render("No commits found"))
+		} else {
+			start := windowStart(cur, listH, total)
+			end := min(total, start+listH)
+			base := lipgloss.NewStyle().Width(contentW).Background(t.BackgroundPanel()).Foreground(t.Text())
+			active := base.Copy().Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Bold(true)
+			for i := start; i < end; i++ {
+				c := commits[i]
+				prefix := "  "
+				marker := "  "
+				style := base
+				if i == cur {
+					prefix = "> "
+					style = active
+				}
+				if i == start && start > 0 {
+					marker = "^ "
+				} else if i == end-1 && end < total {
+					marker = "v "
+				}
+				hash := lipgloss.NewStyle().Foreground(t.Info()).Render(c.Hash)
+				if i == cur {
+					hash = c.Hash
+				}
+				msgW := max(8, contentW-len(c.Hash)-4)
+				msg := truncateText(c.Message, msgW)
+				label := hash + "  " + msg
+				lines = append(lines, style.Render(fitLine(marker+prefix+label, contentW)))
+			}
+		}
+		for len(lines) < listH {
+			base := lipgloss.NewStyle().Width(contentW).Background(t.BackgroundPanel())
+			lines = append(lines, base.Render(""))
+		}
+
+		content := lipgloss.JoinVertical(lipgloss.Left, header, meta, "", strings.Join(lines, "\n"))
+		block := lipgloss.NewStyle().
+			Background(t.BackgroundPanel()).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(t.BorderFocus()).
+			Padding(0, 1).
+			Width(contentW).
+			Render(content)
+		blockW := lipgloss.Width(block)
+		blockH := lipgloss.Height(block)
+		x := max(0, (bodyW-blockW)/2)
+		y := max(0, (bodyH-blockH)/2)
+		surf.Draw(x, y, block)
 		return
 	}
 	if m.diffViewer == nil {
@@ -1868,7 +1976,7 @@ func (m *model) syncFooter() {
 				cfg.Context = m.icons.Projects + " j/k move  enter actions  b backend  n new  r refresh"
 			}
 			if len(m.repos) > 0 {
-				cfg.Position = fmt.Sprintf("%d/%d", min(len(m.repos), m.repoCursor+1), len(m.repos))
+				cfg.Position = fmt.Sprintf("%d/%d", min(m.repoDisplayLen(), m.repoCursor+1), m.repoDisplayLen())
 			}
 			cfg.Scroll = string(m.workspaceKind)
 		} else {
@@ -2492,6 +2600,7 @@ func (m *model) loadReposCmd() tea.Cmd {
 	if strings.TrimSpace(m.authToken) == "" {
 		return nil
 	}
+	m.reposLoading = true
 	page := m.repoPage
 	if page < 1 {
 		page = 1
@@ -2502,12 +2611,36 @@ func (m *model) loadReposCmd() tea.Cmd {
 	}
 }
 
-func (m *model) selectedRepo() (githubauth.Repo, bool) {
+// repoDisplayLen returns the total number of rows in the display list
+// (synthetic "last repo" row + real repos).
+func (m *model) repoDisplayLen() int {
+	if m.lastRepo != "" && len(m.repos) > 0 {
+		return len(m.repos) + 1
+	}
+	return len(m.repos)
+}
+
+// repoAtCursor resolves the actual repo from the current repoCursor,
+// accounting for the optional synthetic "last repo" row at index 0.
+func (m *model) repoAtCursor() (githubauth.Repo, bool) {
 	if len(m.repos) == 0 {
 		return githubauth.Repo{}, false
 	}
-	idx := clamp(m.repoCursor, 0, len(m.repos)-1)
+	hasSynth := m.lastRepo != ""
+	cur := m.repoCursor
+	if hasSynth {
+		if cur == 0 {
+			// synthetic row → resolve to the actual last repo (pinned first by orderRepos)
+			return m.repos[0], true
+		}
+		cur-- // shift past synthetic row
+	}
+	idx := clamp(cur, 0, len(m.repos)-1)
 	return m.repos[idx], true
+}
+
+func (m *model) selectedRepo() (githubauth.Repo, bool) {
+	return m.repoAtCursor()
 }
 
 func (m *model) openRepoCmd(repo githubauth.Repo) tea.Cmd {
@@ -3651,15 +3784,12 @@ func (m *model) lastRepoIndex() int {
 	if len(m.repos) == 0 {
 		return 0
 	}
-	if m.lastRepo == "" {
-		return clamp(m.repoCursor, 0, len(m.repos)-1)
+	// When lastRepo is set, the synthetic row is index 0 in the display list.
+	// Preselect it so the user lands on it immediately.
+	if m.lastRepo != "" {
+		return 0
 	}
-	for i, r := range m.repos {
-		if r.FullName == m.lastRepo {
-			return i
-		}
-	}
-	return clamp(m.repoCursor, 0, len(m.repos)-1)
+	return 0
 }
 
 func (m *model) reloadThemeItems() {
