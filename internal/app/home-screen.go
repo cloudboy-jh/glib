@@ -44,6 +44,14 @@ const glibWordmark = "" +
 	"╚██████╔╝███████╗██║██████╔╝\n" +
 	" ╚═════╝ ╚══════╝╚═╝╚═════╝ "
 
+const diffWordmark = "" +
+	"██████╗  ██╗███████╗███████╗\n" +
+	"██╔══██╗ ██║██╔════╝██╔════╝\n" +
+	"██║  ██║ ██║█████╗  █████╗  \n" +
+	"██║  ██║ ██║██╔══╝  ██╔══╝  \n" +
+	"██████╔╝ ██║██║     ██║     \n" +
+	"╚═════╝  ╚═╝╚═╝     ╚═╝     "
+
 type appMode string
 
 const (
@@ -691,7 +699,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, m.quitCmd()
-		case "ctrl+k":
+		case "ctrl+space":
 			return m, commandpallette.Open(string(m.mode))
 		case "q":
 			if m.mode == modeProjects {
@@ -1973,14 +1981,14 @@ func (m *model) syncFooter() {
 			if m.repoActionOpen {
 				cfg.Context = m.icons.Projects + " h/l choose  enter run  esc back"
 			} else {
-				cfg.Context = m.icons.Projects + " j/k move  enter actions  b backend  n new  r refresh"
+				cfg.Context = m.icons.Projects + " j/k move  enter actions  b backend  n new  r refresh  ctrl+space palette"
 			}
 			if len(m.repos) > 0 {
 				cfg.Position = fmt.Sprintf("%d/%d", min(m.repoDisplayLen(), m.repoCursor+1), m.repoDisplayLen())
 			}
 			cfg.Scroll = string(m.workspaceKind)
 		} else {
-			cfg.Context = m.icons.Projects + " p projects  " + m.icons.PI + " i pi  n new  " + m.icons.Clone + " tab picker  " + m.icons.Quit + " q quit"
+			cfg.Context = m.icons.Projects + " p projects  " + m.icons.PI + " i pi  n new  " + m.icons.Clone + " tab picker  ctrl+space palette  " + m.icons.Quit + " q quit"
 			if len(m.localRows) > 0 {
 				cfg.Position = fmt.Sprintf("%d/%d", min(len(m.localRows), m.localCursor+1), len(m.localRows))
 			}
@@ -3285,7 +3293,7 @@ func (m *model) updatePIKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		return m, m.quitCmd()
-	case "ctrl+k":
+	case "ctrl+space":
 		return m, commandpallette.Open(string(m.mode))
 	case "ctrl+g":
 		m.piui.CmdPrefix = true
