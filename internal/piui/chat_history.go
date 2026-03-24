@@ -43,18 +43,15 @@ func RenderHistory(messages []Message, width int, t theme.Theme) string {
 	for _, msg := range messages {
 		switch msg.Role {
 		case RoleUser:
-			bubble := lipgloss.NewStyle().
-				Background(t.BackgroundPanel()).
-				Foreground(t.Text()).
-				Padding(0, 1).
-				Render(clipWrap(msg.Text, max(8, width-4)))
-			out = append(out, clipWrap(bubble, width))
+			prefix := lipgloss.NewStyle().Foreground(t.TextMuted()).Render(">")
+			text := lipgloss.NewStyle().Foreground(t.TextMuted()).Render(clipWrap(msg.Text, max(8, width-4)))
+			out = append(out, clipWrap(prefix+" "+text, width-1))
 		case RoleAssistant:
-			text := msg.Text
+			text := renderAssistantText(msg.Text, width-1, t)
 			if msg.Streaming {
-				text += "▋"
+				text += lipgloss.NewStyle().Foreground(t.BorderFocus()).Render("▋")
 			}
-			out = append(out, clipWrap(text, width-1))
+			out = append(out, clipWrap(text, width))
 		case RoleTool:
 			if msg.ToolBlock == nil {
 				continue
@@ -157,4 +154,47 @@ func clipWrap(text string, width int) string {
 		out = append(out, styles.ClipANSI(p, width))
 	}
 	return strings.Join(out, "\n")
+}
+
+func renderAssistantText(v string, width int, t theme.Theme) string {
+	v = strings.ReplaceAll(v, "\r", "")
+	if strings.TrimSpace(v) == "" {
+		return ""
+	}
+	lines := strings.Split(v, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			clean := strings.TrimSpace(strings.TrimLeft(trimmed, "#"))
+			out = append(out, lipgloss.NewStyle().Bold(true).Foreground(t.TextMuted()).Render(clean))
+			continue
+		}
+		if strings.HasPrefix(trimmed, "- ") {
+			bullet := lipgloss.NewStyle().Foreground(t.TextMuted()).Render("•")
+			body := renderInlineMarkdown(strings.TrimSpace(strings.TrimPrefix(trimmed, "- ")), t)
+			out = append(out, bullet+" "+body)
+			continue
+		}
+		out = append(out, renderInlineMarkdown(line, t))
+	}
+	return clipWrap(strings.Join(out, "\n"), width)
+}
+
+func renderInlineMarkdown(v string, t theme.Theme) string {
+	if strings.TrimSpace(v) == "" {
+		return ""
+	}
+	parts := strings.Split(v, "`")
+	b := strings.Builder{}
+	for i, part := range parts {
+		if i%2 == 1 {
+			chunk := lipgloss.NewStyle().Background(t.BackgroundPanel()).Foreground(t.SyntaxString()).Render(part)
+			b.WriteString(chunk)
+			continue
+		}
+		plain := strings.ReplaceAll(part, "**", "")
+		b.WriteString(lipgloss.NewStyle().Foreground(t.Text()).Render(plain))
+	}
+	return b.String()
 }

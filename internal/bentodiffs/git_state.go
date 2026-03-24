@@ -176,6 +176,133 @@ func Push(dir string) error {
 	return err
 }
 
+func Pull(dir string) error {
+	_, _, err := RunGit(dir, "pull", "--ff-only")
+	return err
+}
+
+func Fetch(dir string) error {
+	_, _, err := RunGit(dir, "fetch", "--all", "--prune")
+	return err
+}
+
+func UnstageAll(dir string) error {
+	_, _, err := RunGit(dir, "restore", "--staged", ".")
+	return err
+}
+
+func StashPush(dir string, message string) error {
+	msg := strings.TrimSpace(message)
+	if msg == "" {
+		_, _, err := RunGit(dir, "stash", "push", "-u")
+		return err
+	}
+	_, _, err := RunGit(dir, "stash", "push", "-u", "-m", msg)
+	return err
+}
+
+func StashPop(dir string) error {
+	_, _, err := RunGit(dir, "stash", "pop")
+	return err
+}
+
+func StashList(dir string, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	out, _, err := RunGit(dir, "stash", "list")
+	if err != nil {
+		return nil, err
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return []string{}, nil
+	}
+	lines := strings.Split(out, "\n")
+	if len(lines) > limit {
+		lines = lines[:limit]
+	}
+	return lines, nil
+}
+
+func BranchList(dir string) ([]string, string, error) {
+	out, _, err := RunGit(dir, "branch", "--format=%(refname:short)")
+	if err != nil {
+		return nil, "", err
+	}
+	cur, _, curErr := RunGit(dir, "rev-parse", "--abbrev-ref", "HEAD")
+	if curErr != nil {
+		cur = ""
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return []string{}, strings.TrimSpace(cur), nil
+	}
+	branches := strings.Split(out, "\n")
+	for i := range branches {
+		branches[i] = strings.TrimSpace(branches[i])
+	}
+	sort.Strings(branches)
+	return branches, strings.TrimSpace(cur), nil
+}
+
+func BranchCreate(dir string, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("branch name cannot be empty")
+	}
+	_, _, err := RunGit(dir, "checkout", "-b", name)
+	return err
+}
+
+func BranchSwitch(dir string, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("branch name cannot be empty")
+	}
+	_, _, err := RunGit(dir, "checkout", name)
+	return err
+}
+
+func BranchDelete(dir string, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("branch name cannot be empty")
+	}
+	_, _, err := RunGit(dir, "branch", "-d", name)
+	return err
+}
+
+func CommitLog(dir string, limit int) ([]CommitInfo, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	out, _, err := RunGit(dir, "log", fmt.Sprintf("-%d", limit), "--format=%h\t%s\t%cI")
+	if err != nil {
+		return nil, err
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return []CommitInfo{}, nil
+	}
+	lines := strings.Split(out, "\n")
+	commits := make([]CommitInfo, 0, len(lines))
+	for _, line := range lines {
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) < 2 {
+			continue
+		}
+		ci := CommitInfo{Hash: strings.TrimSpace(parts[0]), Message: strings.TrimSpace(parts[1])}
+		if len(parts) == 3 {
+			if tm, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(parts[2])); parseErr == nil {
+				ci.Time = tm
+			}
+		}
+		commits = append(commits, ci)
+	}
+	return commits, nil
+}
+
 func (s *GitState) Rows() []Row {
 	rows := make([]Row, 0, len(s.Staged)+len(s.Unstaged)+len(s.Untracked)+6)
 	rows = append(rows, Row{Kind: rowHeader, Label: fmt.Sprintf("STAGED (%d)", len(s.Staged))})

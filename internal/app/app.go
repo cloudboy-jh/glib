@@ -11,6 +11,7 @@ import (
 	bdcore "github.com/cloudboy-jh/bento-diffs/pkg/bentodiffs"
 	"github.com/cloudboy-jh/bentotui/registry/bricks/badge"
 	"github.com/cloudboy-jh/bentotui/registry/bricks/card"
+	"github.com/cloudboy-jh/bentotui/registry/bricks/dialog"
 	"github.com/cloudboy-jh/bentotui/registry/bricks/input"
 	selectx "github.com/cloudboy-jh/bentotui/registry/bricks/select"
 	"github.com/cloudboy-jh/bentotui/registry/bricks/surface"
@@ -20,10 +21,12 @@ import (
 	"github.com/cloudboy-jh/bentotui/theme"
 	"github.com/cloudboy-jh/bentotui/theme/styles"
 	"glib/internal/bentodiffs"
+	commandpallette "glib/internal/command-pallette"
 	"glib/internal/githubauth"
 	"glib/internal/pi"
 	"glib/internal/piui"
 	"glib/internal/projects"
+	"glib/internal/slash"
 	"glib/internal/workspace"
 )
 
@@ -57,6 +60,22 @@ const (
 	pickerRepos pickerMode = "REPOS"
 )
 
+type diffViewMode string
+
+const (
+	diffViewOpen    diffViewMode = "open"
+	diffViewHistory diffViewMode = "history"
+)
+
+type gitViewMode string
+
+const (
+	gitViewStatus   gitViewMode = "status"
+	gitViewBranches gitViewMode = "branches"
+	gitViewStash    gitViewMode = "stash"
+	gitViewLog      gitViewMode = "log"
+)
+
 type promptMode string
 
 const (
@@ -68,6 +87,8 @@ const (
 	promptTheme     promptMode = "theme"
 	promptNewProj   promptMode = "new_project"
 	promptDiffRev   promptMode = "diff_revision"
+	promptBranchNew promptMode = "branch_new"
+	promptPIPause   promptMode = "pi_pause_confirm"
 )
 
 type gitRefreshMsg struct {
@@ -88,6 +109,27 @@ type diffRefreshMsg struct {
 type cloneDoneMsg struct {
 	ProjectPath string
 	Err         error
+}
+
+type diffHistoryMsg struct {
+	Commits []bentodiffs.CommitInfo
+	Err     error
+}
+
+type gitBranchesMsg struct {
+	Branches []string
+	Current  string
+	Err      error
+}
+
+type gitStashMsg struct {
+	Items []string
+	Err   error
+}
+
+type gitLogMsg struct {
+	Commits []bentodiffs.CommitInfo
+	Err     error
 }
 
 type authBootstrapMsg struct {
@@ -119,6 +161,11 @@ type piSendMsg struct {
 	Err error
 }
 
+type piContextMsg struct {
+	Text string
+	Err  error
+}
+
 type workspaceCleanupMsg struct {
 	Result workspace.CleanupResult
 }
@@ -143,10 +190,12 @@ type iconSet struct {
 
 type model struct {
 	footer           *vimstatus.Model
+	dialogs          *dialog.Manager
 	inputBox         *input.Model
 	promptInput      *input.Model
 	localPicker      *selectx.Model
 	themePicker      *selectx.Model
+	commitPicker     *selectx.Model
 	width            int
 	height           int
 	inputW           int
@@ -167,7 +216,12 @@ type model struct {
 	git              bentodiffs.GitState
 	diff             bentodiffs.DiffState
 	diffViewer       bdcore.Viewer
+	diffView         diffViewMode
+	diffHistory      []bentodiffs.CommitInfo
+	diffHistoryCur   int
 	piProc           *pi.PiProcess
+	piRepoPath       string
+	piPendingContext string
 	piui             *piui.Session
 	localDir         string
 	localEntries     []projects.Entry
@@ -192,6 +246,14 @@ type model struct {
 	quitting         bool
 	pendingSlash     map[string]string
 	slashSeq         int
+	gitView          gitViewMode
+	gitBranches      []string
+	gitCurrentBranch string
+	gitBranchCursor  int
+	gitStash         []string
+	gitStashCursor   int
+	gitLog           []bentodiffs.CommitInfo
+	gitLogCursor     int
 }
 
 func NewModel() *model {
@@ -207,28 +269,37 @@ func NewModel() *model {
 	tp.SetPlaceholder("No themes")
 	tp.Focus()
 	tp.Open()
+	cp := selectx.New()
+	cp.SetPlaceholder("No commits")
+	cp.Focus()
+	cp.Open()
 	piSession := piui.NewSession()
 
 	cwd, _ := os.Getwd()
 	m := &model{
 		footer:        vimstatus.New(theme.CurrentTheme()),
+		dialogs:       dialog.New(),
 		inputBox:      inp,
 		promptInput:   promptInp,
 		piui:          piSession,
 		localPicker:   lp,
 		themePicker:   tp,
+		commitPicker:  cp,
 		mode:          modeProjects,
 		picker:        pickerLocal,
 		localDir:      cwd,
 		localExpanded: map[string]bool{},
 		icons:         resolveIcons(),
 		diff:          bentodiffs.DiffState{},
+		diffView:      diffViewHistory,
+		gitView:       gitViewStatus,
 		authStatus:    githubauth.StatusSignedOut,
 		authClientID:  resolveGitHubClientID(),
 		repoPage:      1,
 		workspaceKind: workspace.KindLocal,
 		pendingSlash:  map[string]string{},
 	}
+	m.dialogs.SetTheme(theme.CurrentTheme())
 	ws, err := workspace.NewManager(workspace.KindLocal)
 	if err == nil {
 		m.workspace = ws
@@ -248,6 +319,17 @@ func (m *model) Init() tea.Cmd {
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.dialogs != nil && m.dialogs.IsOpen() {
+		switch msg.(type) {
+		case dialog.OpenMsg, dialog.CloseMsg:
+			// lifecycle handled below
+		default:
+			u, cmd := m.dialogs.Update(msg)
+			m.dialogs = u.(*dialog.Manager)
+			return m, cmd
+		}
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -258,6 +340,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.piui.SetSize(m.width, m.bodyHeight())
 		m.resizeLocalPicker()
 		m.footer.SetSize(m.width, 1)
+		if m.dialogs != nil {
+			m.dialogs.SetSize(m.width, m.height)
+		}
 		if m.diffViewer != nil {
 			m.diffViewer.SetSize(max(20, m.width-2), max(1, m.bodyHeight()-2))
 		}
@@ -269,7 +354,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.diffViewer.SetTheme(theme.CurrentTheme())
 		}
 		m.footer.SetTheme(theme.CurrentTheme())
+		if m.dialogs != nil {
+			m.dialogs.SetTheme(theme.CurrentTheme())
+		}
+		m.refreshAgentViewport()
 		return m, nil
+
+	case dialog.OpenMsg, dialog.CloseMsg:
+		u, cmd := m.dialogs.Update(msg)
+		m.dialogs = u.(*dialog.Manager)
+		return m, cmd
+
+	case commandpallette.ActionMsg:
+		return m.handlePaletteAction(msg)
 
 	case gitRefreshMsg:
 		if msg.Err != nil {
@@ -304,8 +401,51 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.diff.SelectedPath = msg.SelectedPath
 		return m, nil
 
+	case diffHistoryMsg:
+		if msg.Err != nil {
+			m.showError(msg.Err.Error())
+			return m, nil
+		}
+		m.diffHistory = msg.Commits
+		m.diffHistoryCur = clamp(m.diffHistoryCur, 0, max(0, len(m.diffHistory)-1))
+		m.diffView = diffViewHistory
+		m.reloadCommitPicker()
+		return m, nil
+
+	case gitBranchesMsg:
+		if msg.Err != nil {
+			m.showError(msg.Err.Error())
+			return m, nil
+		}
+		m.gitBranches = msg.Branches
+		m.gitCurrentBranch = msg.Current
+		m.gitBranchCursor = clamp(m.gitBranchCursor, 0, max(0, len(m.gitBranches)-1))
+		m.gitView = gitViewBranches
+		return m, nil
+
+	case gitStashMsg:
+		if msg.Err != nil {
+			m.showError(msg.Err.Error())
+			return m, nil
+		}
+		m.gitStash = msg.Items
+		m.gitStashCursor = clamp(m.gitStashCursor, 0, max(0, len(m.gitStash)-1))
+		m.gitView = gitViewStash
+		return m, nil
+
+	case gitLogMsg:
+		if msg.Err != nil {
+			m.showError(msg.Err.Error())
+			return m, nil
+		}
+		m.gitLog = msg.Commits
+		m.gitLogCursor = clamp(m.gitLogCursor, 0, max(0, len(m.gitLog)-1))
+		m.gitView = gitViewLog
+		return m, nil
+
 	case bentodiffs.OpenDiffMsg:
 		m.mode = modeDiff
+		m.diffView = diffViewOpen
 		m.ensureDiffViewer()
 		if useMockViews {
 			m.diffViewer.SetDiffs(bentodiffs.MockDiffs())
@@ -324,14 +464,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showError(msg.Err.Error())
 			return m, nil
 		}
-		m.projectPath = msg.ProjectPath
+		if strings.TrimSpace(m.projectPath) != "" && strings.TrimSpace(m.projectPath) != strings.TrimSpace(msg.ProjectPath) {
+			if m.piSessionActiveForRepo(m.projectPath) {
+				m.stopPi()
+			}
+		}
+		m.projectPath = m.normalizeRepoPath(msg.ProjectPath)
 		if strings.TrimSpace(m.pendingRepoName) != "" {
 			m.activeRepoName = strings.TrimSpace(m.pendingRepoName)
 			m.pendingRepoName = ""
 		} else {
-			m.activeRepoName = inferRepoNameFromPath(msg.ProjectPath)
+			m.activeRepoName = inferRepoNameFromPath(m.projectPath)
 		}
-		m.addRecent(msg.ProjectPath)
+		m.addRecent(m.projectPath)
 		m.statusMessage = "repo ready"
 		launch := m.pendingLaunch
 		m.pendingLaunch = ""
@@ -339,12 +484,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch launch {
 		case "diff":
 			m.mode = modeDiff
+			m.diffView = diffViewHistory
 			m.ensureDiffViewer()
 			if useMockViews {
 				m.diffViewer.SetDiffs(bentodiffs.MockDiffs())
 				return m, nil
 			}
-			return m, m.refreshDiffCmd("", "", "")
+			return m, m.loadDiffHistoryCmd()
 		case "git":
 			m.mode = modeGit
 			if useMockViews {
@@ -354,6 +500,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.refreshGitCmd()
 		case "pi":
 			m.mode = modePI
+			if m.piSessionActiveForRepo(m.projectPath) {
+				return m, nil
+			}
 			return m, m.startPiCmd()
 		default:
 			m.mode = modeProjects
@@ -423,15 +572,22 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.piProc = msg.Proc
+		m.piRepoPath = strings.TrimSpace(m.projectPath)
 		m.piui.Status = "connected"
 		m.refreshAgentViewport()
-		return m, tea.Batch(
+		base := []tea.Cmd{
 			m.readPiEventCmd(),
 			piui.SpinnerTickCmd(),
 			m.sendPiCmd(pi.CmdGetState()),
 			m.sendPiCmd(map[string]any{"type": "get_commands"}),
 			m.sendPiCmd(map[string]any{"type": "get_session_stats"}),
-		)
+		}
+		if strings.TrimSpace(m.piPendingContext) != "" {
+			ctx := m.piPendingContext
+			m.piPendingContext = ""
+			base = append(base, m.sendPiCmd(pi.CmdPrompt(ctx)))
+		}
+		return m, tea.Batch(base...)
 
 	case piSendMsg:
 		if msg.Err != nil {
@@ -439,6 +595,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.readPiEventCmd()
+
+	case piContextMsg:
+		if msg.Err != nil {
+			m.showError(msg.Err.Error())
+			return m, nil
+		}
+		if strings.TrimSpace(msg.Text) == "" {
+			return m, nil
+		}
+		m.mode = modePI
+		if m.piSessionActiveForRepo(m.projectPath) {
+			return m, m.sendPiCmd(pi.CmdPromptWithStreamingBehavior(msg.Text, "steer"))
+		}
+		m.piPendingContext = msg.Text
+		return m, m.startPiCmd()
 
 	case pi.PiEventMsg:
 		next := m.handlePiEvent(msg)
@@ -517,6 +688,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, m.quitCmd()
+		case "ctrl+k":
+			return m, commandpallette.Open(string(m.mode))
 		case "q":
 			if m.mode == modeProjects {
 				return m, m.quitCmd()
@@ -546,6 +719,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if ok {
 					if m.activeRepoName == repo.FullName && strings.TrimSpace(m.projectPath) != "" && bentodiffs.IsGitRepo(m.projectPath) {
 						m.mode = modePI
+						if m.piSessionActiveForRepo(m.projectPath) {
+							return m, nil
+						}
 						return m, m.startPiCmd()
 					}
 					m.pendingLaunch = "pi"
@@ -568,9 +744,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.mode = modePI
+			if m.piSessionActiveForRepo(m.projectPath) {
+				return m, nil
+			}
 			return m, m.startPiCmd()
 		case "D":
 			m.mode = modeDiff
+			m.diffView = diffViewHistory
 			m.ensureDiffViewer()
 			if useMockViews {
 				m.diffViewer.SetDiffs(bentodiffs.MockDiffs())
@@ -579,7 +759,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.projectPath == "" {
 				return m, nil
 			}
-			return m, m.refreshDiffCmd("", "", "")
+			return m, m.loadDiffHistoryCmd()
 		case "G":
 			m.mode = modeGit
 			if useMockViews {
@@ -592,6 +772,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			m.mode = modeDiff
+			m.diffView = diffViewHistory
 			m.ensureDiffViewer()
 			if useMockViews {
 				m.diffViewer.SetDiffs(bentodiffs.MockDiffs())
@@ -600,7 +781,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.projectPath == "" {
 				return m, nil
 			}
-			return m, m.refreshDiffCmd("", "", "")
+			return m, m.loadDiffHistoryCmd()
 		case "g":
 			if m.mode != modeProjects {
 				break
@@ -612,7 +793,6 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.refreshGitCmd()
 		case "p":
-			m.stopPi()
 			m.mode = modeProjects
 			return m, m.inputBox.Focus()
 		}
@@ -786,6 +966,30 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.mode == modeDiff {
+			if m.diffView == diffViewHistory {
+				switch msg.String() {
+				case "esc", "q":
+					m.mode = modeProjects
+					return m, nil
+				case "c":
+					m.diffView = diffViewOpen
+					return m, m.refreshDiffCmd("", "", "")
+				case "enter":
+					sel, ok := m.commitPicker.Selected()
+					if ok {
+						sha := strings.TrimSpace(sel.Value)
+						if sha != "" {
+							m.diffView = diffViewOpen
+							return m, m.refreshDiffCmd("commit", sha, "")
+						}
+					}
+					return m, nil
+				}
+				u, cmd := m.commitPicker.Update(msg)
+				m.commitPicker = u.(*selectx.Model)
+				return m, cmd
+			}
+
 			if m.diffViewer == nil {
 				m.ensureDiffViewer()
 			}
@@ -804,8 +1008,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "N":
 				m.diffViewer.PrevFile()
 			case "c":
-				m.openPrompt(promptDiffRev, "View Commit Diff", "Enter commit sha/ref", "HEAD")
-				return m, m.promptInput.Focus()
+				return m, m.loadDiffHistoryCmd()
 			case "}":
 				m.diffViewer.NextHunk()
 			case "{":
@@ -815,8 +1018,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "end":
 				state := m.diffViewer.State()
 				m.diffViewer.ScrollDown(max(0, state.MaxScroll-state.Scroll))
+			case "i":
+				return m, m.sendDiffContextToPiCmd()
 			case "g", "G":
 				m.mode = modeGit
+				m.gitView = gitViewStatus
 				if useMockViews {
 					m.git = bentodiffs.MockGitState()
 					return m, nil
@@ -829,6 +1035,66 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.mode == modeGit {
+			if m.gitView == gitViewBranches {
+				switch msg.String() {
+				case "j", "down":
+					m.gitBranchCursor = clamp(m.gitBranchCursor+1, 0, max(0, len(m.gitBranches)-1))
+				case "k", "up":
+					m.gitBranchCursor = clamp(m.gitBranchCursor-1, 0, max(0, len(m.gitBranches)-1))
+				case "n":
+					m.openPrompt(promptBranchNew, "New Branch", "Enter branch name", "")
+					return m, m.promptInput.Focus()
+				case "D":
+					if len(m.gitBranches) > 0 {
+						name := strings.TrimSpace(m.gitBranches[m.gitBranchCursor])
+						if name != "" && name != m.gitCurrentBranch {
+							return m, m.deleteBranchCmd(name)
+						}
+					}
+				case "enter":
+					if len(m.gitBranches) > 0 {
+						name := strings.TrimSpace(m.gitBranches[m.gitBranchCursor])
+						if name != "" {
+							return m, m.switchBranchCmd(name)
+						}
+					}
+				case "esc", "q":
+					m.gitView = gitViewStatus
+				}
+				return m, nil
+			}
+			if m.gitView == gitViewStash {
+				switch msg.String() {
+				case "j", "down":
+					m.gitStashCursor = clamp(m.gitStashCursor+1, 0, max(0, len(m.gitStash)-1))
+				case "k", "up":
+					m.gitStashCursor = clamp(m.gitStashCursor-1, 0, max(0, len(m.gitStash)-1))
+				case "esc", "q":
+					m.gitView = gitViewStatus
+				}
+				return m, nil
+			}
+			if m.gitView == gitViewLog {
+				switch msg.String() {
+				case "j", "down":
+					m.gitLogCursor = clamp(m.gitLogCursor+1, 0, max(0, len(m.gitLog)-1))
+				case "k", "up":
+					m.gitLogCursor = clamp(m.gitLogCursor-1, 0, max(0, len(m.gitLog)-1))
+				case "enter":
+					if len(m.gitLog) > 0 {
+						sha := strings.TrimSpace(m.gitLog[m.gitLogCursor].Hash)
+						if sha != "" {
+							m.mode = modeDiff
+							m.diffView = diffViewOpen
+							return m, m.refreshDiffCmd("commit", sha, "")
+						}
+					}
+				case "esc", "q":
+					m.gitView = gitViewStatus
+				}
+				return m, nil
+			}
+
 			switch msg.String() {
 			case "j", "down":
 				m.git.MoveCursor(1)
@@ -836,8 +1102,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.git.MoveCursor(-1)
 			case "s":
 				return m, m.stageFileCmd()
+			case "a":
+				return m, m.stageAllCmd()
 			case "u":
 				return m, m.unstageFileCmd()
+			case "A":
+				return m, m.unstageAllCmd()
 			case "d":
 				if f, ok := m.git.SelectedFile(); ok {
 					m.pendingPath = f.Path
@@ -849,6 +1119,22 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.promptInput.Focus()
 			case "p":
 				return m, m.pushCmd()
+			case "P":
+				return m, m.pullCmd()
+			case "f":
+				return m, m.fetchCmd()
+			case "b":
+				return m, m.loadBranchesCmd()
+			case "l":
+				return m, m.loadGitLogCmd()
+			case "z":
+				return m, m.stashPushCmd()
+			case "Z":
+				return m, m.stashPopCmd()
+			case "?":
+				return m, m.loadStashCmd()
+			case "i":
+				return m, m.sendStagedDiffToPiCmd()
 			case "enter":
 				return m, m.git.OpenSelectedDiffCmd()
 			case "q", "esc":
@@ -896,6 +1182,9 @@ func (m *model) View() tea.View {
 	surf := surface.New(m.width, m.height)
 	surf.Fill(canvasColor)
 	surf.Draw(0, 0, screen)
+	if m.dialogs != nil && m.dialogs.IsOpen() {
+		surf.DrawCenter(viewString(m.dialogs.View()))
+	}
 
 	if m.prompt != promptNone {
 		surf.DrawCenter(m.renderPrompt(t))
@@ -1189,6 +1478,11 @@ func (m *model) drawDiffView(surf *surface.Surface, bodyW, bodyH int, t theme.Th
 		surf.Draw(2, 1, "No project selected. Use p to choose a project.")
 		return
 	}
+	if m.diffView == diffViewHistory {
+		m.commitPicker.SetSize(bodyW, bodyH)
+		surf.Draw(0, 0, viewString(m.commitPicker.View()))
+		return
+	}
 	if m.diffViewer == nil {
 		m.ensureDiffViewer()
 	}
@@ -1197,6 +1491,7 @@ func (m *model) drawDiffView(surf *surface.Surface, bodyW, bodyH int, t theme.Th
 	m.diffViewer.SetTheme(t)
 	viewer := strings.TrimRight(m.diffViewer.View(), "\n")
 	if viewer == "" {
+		surf.Draw(2, 1, lipgloss.NewStyle().Foreground(t.TextMuted()).Render("no open changes  c commit history"))
 		return
 	}
 	lines := strings.Split(viewer, "\n")
@@ -1209,6 +1504,62 @@ func (m *model) drawDiffView(surf *surface.Surface, bodyW, bodyH int, t theme.Th
 func (m *model) drawGitView(surf *surface.Surface, bodyW, bodyH int, t theme.Theme) {
 	if !useMockViews && m.projectPath == "" {
 		surf.Draw(2, 1, "No project selected. Use p to choose a project.")
+		return
+	}
+
+	if m.gitView == gitViewBranches {
+		contentW := max(8, bodyW-2)
+		lines := []string{lipgloss.NewStyle().Bold(true).Foreground(t.TextAccent()).Render("Branches")}
+		if len(m.gitBranches) == 0 {
+			lines = append(lines, lipgloss.NewStyle().Foreground(t.TextMuted()).Render("No local branches"))
+		} else {
+			for i, b := range m.gitBranches {
+				prefix := "  "
+				if b == m.gitCurrentBranch {
+					prefix = "* "
+				}
+				line := prefix + b
+				if i == m.gitBranchCursor {
+					line = lipgloss.NewStyle().Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Render(fitLine(line, contentW))
+				}
+				lines = append(lines, fitLine(line, contentW))
+			}
+		}
+		surf.Draw(1, 1, strings.Join(lines, "\n"))
+		return
+	}
+	if m.gitView == gitViewStash {
+		contentW := max(8, bodyW-2)
+		lines := []string{lipgloss.NewStyle().Bold(true).Foreground(t.TextAccent()).Render("Stash")}
+		if len(m.gitStash) == 0 {
+			lines = append(lines, lipgloss.NewStyle().Foreground(t.TextMuted()).Render("No stashes"))
+		} else {
+			for i, item := range m.gitStash {
+				line := item
+				if i == m.gitStashCursor {
+					line = lipgloss.NewStyle().Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Render(fitLine(line, contentW))
+				}
+				lines = append(lines, fitLine(line, contentW))
+			}
+		}
+		surf.Draw(1, 1, strings.Join(lines, "\n"))
+		return
+	}
+	if m.gitView == gitViewLog {
+		contentW := max(8, bodyW-2)
+		lines := []string{lipgloss.NewStyle().Bold(true).Foreground(t.TextAccent()).Render("Commit log")}
+		if len(m.gitLog) == 0 {
+			lines = append(lines, lipgloss.NewStyle().Foreground(t.TextMuted()).Render("No commits"))
+		} else {
+			for i, c := range m.gitLog {
+				line := c.Hash + "  " + c.Message
+				if i == m.gitLogCursor {
+					line = lipgloss.NewStyle().Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Render(fitLine(line, contentW))
+				}
+				lines = append(lines, fitLine(line, contentW))
+			}
+		}
+		surf.Draw(1, 1, strings.Join(lines, "\n"))
 		return
 	}
 
@@ -1367,7 +1718,7 @@ func (m *model) drawPIView(surf *surface.Surface, bodyH int, t theme.Theme) {
 	surf.Draw(0, vh+1, bottom)
 
 	headerRows := 1
-	inputRows := 5
+	inputRows := m.piInputRows(max(8, vw-4))
 	slashRows := m.piui.SlashRows(8)
 	slashPanelH := 0
 	if m.piui.SlashActive() && len(slashRows) > 0 {
@@ -1434,7 +1785,7 @@ func (m *model) drawPIView(surf *surface.Surface, bodyH int, t theme.Theme) {
 		surf.Draw(1, panelStartY+slashPanelH-1, fitLine(hint, vw))
 	}
 
-	inputContent := viewString(m.piui.Input.View())
+	inputContent := fitLine(viewString(m.piui.Input.View()), max(8, vw-4))
 
 	contentW := max(8, vw-2)
 	mkRow := func(content string) string {
@@ -1447,13 +1798,15 @@ func (m *model) drawPIView(surf *surface.Surface, bodyH int, t theme.Theme) {
 			Render(content)
 	}
 	blank := lipgloss.NewStyle().Background(t.InputBG()).Width(contentW + 2).Render(" ")
-	inputBlock := lipgloss.JoinVertical(lipgloss.Left,
-		blank,
-		blank,
-		mkRow(inputContent),
-		blank,
-		blank,
-	)
+	rows := make([]string, 0, inputRows)
+	rows = append(rows, blank)
+	extraRows := max(0, inputRows-3)
+	for i := 0; i < extraRows; i++ {
+		rows = append(rows, mkRow(""))
+	}
+	rows = append(rows, mkRow(inputContent))
+	rows = append(rows, blank)
+	inputBlock := lipgloss.JoinVertical(lipgloss.Left, rows...)
 	inputBox := lipgloss.NewStyle().
 		Background(t.InputBG()).
 		Border(lipgloss.Border{Left: "┃"}, false, false, false, true).
@@ -1524,20 +1877,46 @@ func (m *model) syncFooter() {
 				cfg.Position = fmt.Sprintf("%d/%d", min(len(m.localRows), m.localCursor+1), len(m.localRows))
 			}
 		}
+		if m.piSessionActiveForRepo(m.projectPath) {
+			cfg.Scroll = "● pi active  i resume"
+		}
 	case modeDiff:
-		cfg.Context = m.icons.Diff + " j/k scroll  n/N file  c commit  { } hunk  " + m.icons.Git + " g git"
-		if m.diffViewer != nil {
+		if m.diffView == diffViewHistory {
+			cfg.Context = m.icons.Diff + " commit history  enter open  esc back"
+			cfg.Position = fmt.Sprintf("%d/%d", min(len(m.diffHistory), m.diffHistoryCur+1), max(1, len(m.diffHistory)))
+		} else {
+			cfg.Context = m.icons.Diff + " j/k scroll  n/N file  c commit history  i send to pi"
+		}
+		if m.diffView == diffViewOpen && m.diffViewer != nil {
 			st := m.diffViewer.State()
 			cfg.Position = fmt.Sprintf("%d/%d", st.Scroll+1, st.MaxScroll+1)
 			cfg.Scroll = fmt.Sprintf("file %d/%d", st.ActiveFile+1, max(1, st.FileCount))
 		}
-	case modeGit:
-		cfg.Context = m.icons.Git + " s stage  u unstage  c commit  d discard  enter diff"
-		rows := m.git.Rows()
-		if len(rows) > 0 {
-			cfg.Position = fmt.Sprintf("%d/%d", min(len(rows), m.git.Cursor+1), len(rows))
+		if m.piSessionActiveForRepo(m.projectPath) {
+			cfg.Scroll = "i back to pi"
 		}
-		cfg.Scroll = fmt.Sprintf("+%d -%d", m.git.AddedTotal, m.git.DeletedTotal)
+	case modeGit:
+		switch m.gitView {
+		case gitViewBranches:
+			cfg.Context = m.icons.Git + " branches  enter switch  n new  D delete  esc back"
+			cfg.Position = fmt.Sprintf("%d/%d", min(len(m.gitBranches), m.gitBranchCursor+1), max(1, len(m.gitBranches)))
+		case gitViewStash:
+			cfg.Context = m.icons.Git + " stash list  esc back"
+			cfg.Position = fmt.Sprintf("%d/%d", min(len(m.gitStash), m.gitStashCursor+1), max(1, len(m.gitStash)))
+		case gitViewLog:
+			cfg.Context = m.icons.Git + " log  enter open in diff  esc back"
+			cfg.Position = fmt.Sprintf("%d/%d", min(len(m.gitLog), m.gitLogCursor+1), max(1, len(m.gitLog)))
+		default:
+			cfg.Context = m.icons.Git + " s stage  u unstage  a/A all  c commit  b branches  l log  z/Z stash  i to pi"
+			rows := m.git.Rows()
+			if len(rows) > 0 {
+				cfg.Position = fmt.Sprintf("%d/%d", min(len(rows), m.git.Cursor+1), len(rows))
+			}
+			cfg.Scroll = fmt.Sprintf("+%d -%d", m.git.AddedTotal, m.git.DeletedTotal)
+		}
+		if m.piSessionActiveForRepo(m.projectPath) {
+			cfg.Scroll = "i back to pi"
+		}
 	case modePI:
 		st := m.piui.FooterState("", "")
 		cfg.Context = st.Context
@@ -1597,6 +1976,10 @@ func (m *model) updatePrompt(msg tea.KeyMsg) tea.Cmd {
 	case "enter":
 		val := strings.TrimSpace(m.promptInput.Value())
 		switch m.prompt {
+		case promptPIPause:
+			m.closePrompt()
+			m.mode = modeProjects
+			return m.inputBox.Focus()
 		case promptCloneDest:
 			m.closePrompt()
 			if val == "" {
@@ -1637,7 +2020,15 @@ func (m *model) updatePrompt(msg tea.KeyMsg) tea.Cmd {
 				return nil
 			}
 			m.mode = modeDiff
+			m.diffView = diffViewOpen
 			return m.refreshDiffCmd("commit", val, "")
+		case promptBranchNew:
+			m.closePrompt()
+			if val == "" {
+				m.showError("branch name cannot be empty")
+				return nil
+			}
+			return m.createBranchCmd(val)
 		case promptError:
 			m.closePrompt()
 			return nil
@@ -1711,6 +2102,19 @@ func (m *model) piViewportSize() (int, int) {
 	return max(1, m.width-2), max(1, m.bodyHeight()-2)
 }
 
+func (m *model) piInputRows(contentWidth int) int {
+	if contentWidth <= 0 {
+		contentWidth = 32
+	}
+	text := strings.TrimSpace(m.piui.Input.Value())
+	if text == "" {
+		return 3
+	}
+	lines := wrapPlainText(text, contentWidth)
+	contentRows := clamp(len(lines), 1, 4)
+	return contentRows + 2
+}
+
 func (m *model) projectsPanelWidth() int {
 	target := m.width * 40 / 100
 	target = min(target, 62)
@@ -1779,9 +2183,9 @@ func (m *model) activateLocalSelection() {
 			return
 		}
 		if bentodiffs.IsGitRepo(row.Path) {
-			m.projectPath = row.Path
-			m.activeRepoName = inferRepoNameFromPath(row.Path)
-			m.addRecent(row.Path)
+			m.projectPath = m.normalizeRepoPath(row.Path)
+			m.activeRepoName = inferRepoNameFromPath(m.projectPath)
+			m.addRecent(m.projectPath)
 			m.statusMessage = "project selected"
 			return
 		}
@@ -1789,10 +2193,10 @@ func (m *model) activateLocalSelection() {
 		m.rebuildLocalTree()
 		return
 	}
-	if bentodiffs.IsGitRepo(m.localDir) {
-		m.projectPath = m.localDir
-		m.activeRepoName = inferRepoNameFromPath(m.localDir)
-		m.addRecent(m.localDir)
+	if root := m.findRepoRoot(row.Path); root != "" {
+		m.projectPath = root
+		m.activeRepoName = inferRepoNameFromPath(root)
+		m.addRecent(root)
 		m.statusMessage = "project selected"
 	}
 }
@@ -1983,6 +2387,34 @@ func fitMultiline(text string, maxWidth, maxLines int) string {
 	return strings.Join(out, "\n")
 }
 
+func wrapPlainText(text string, maxWidth int) []string {
+	if maxWidth <= 0 {
+		return []string{text}
+	}
+	text = strings.ReplaceAll(text, "\r", "")
+	raw := strings.Split(text, "\n")
+	out := make([]string, 0, len(raw))
+	for _, line := range raw {
+		if line == "" {
+			out = append(out, "")
+			continue
+		}
+		for lipgloss.Width(line) > maxWidth {
+			cut := maxWidth
+			if cut > len(line) {
+				cut = len(line)
+			}
+			out = append(out, line[:cut])
+			line = line[cut:]
+		}
+		out = append(out, line)
+	}
+	if len(out) == 0 {
+		return []string{""}
+	}
+	return out
+}
+
 func fitLine(text string, maxWidth int) string {
 	if maxWidth <= 0 {
 		return ""
@@ -2157,11 +2589,20 @@ func (m *model) refreshDiffCmd(source, commitSHA, selectedPath string) tea.Cmd {
 		if selectedPath != "" && source != "working" {
 			args = append(args, "--", selectedPath)
 		}
-		if err == nil && out == "" {
+		if err == nil && out == "" && len(args) > 0 {
 			out, _, err = bentodiffs.RunGit(m.projectPath, args...)
 		}
 		if err != nil {
 			return diffRefreshMsg{Err: err}
+		}
+		if strings.TrimSpace(out) == "" {
+			return diffRefreshMsg{
+				Diffs:        []bdcore.DiffResult{},
+				Source:       source,
+				CommitSHA:    commitSHA,
+				ProjectDir:   m.projectPath,
+				SelectedPath: selectedPath,
+			}
 		}
 		diffs, parseErr := bdcore.ParseUnifiedDiffs(out)
 		if parseErr != nil {
@@ -2198,6 +2639,29 @@ func (m *model) stageFileCmd() tea.Cmd {
 			return gitRefreshMsg{Err: err}
 		}
 		return gitRefreshMsg{State: state, Action: "staged " + f.Path}
+	}
+}
+
+func (m *model) stageAllCmd() tea.Cmd {
+	if useMockViews {
+		return func() tea.Msg {
+			state := bentodiffs.MockGitState()
+			state.Cursor = m.git.Cursor
+			return gitRefreshMsg{State: state, Action: "mock: staged all"}
+		}
+	}
+	return func() tea.Msg {
+		if m.projectPath == "" {
+			return gitRefreshMsg{Err: fmt.Errorf("select a project first")}
+		}
+		if _, _, err := bentodiffs.RunGit(m.projectPath, "add", "-A"); err != nil {
+			return gitRefreshMsg{Err: err}
+		}
+		state, err := bentodiffs.Refresh(m.projectPath)
+		if err != nil {
+			return gitRefreshMsg{Err: err}
+		}
+		return gitRefreshMsg{State: state, Action: "staged all changes"}
 	}
 }
 
@@ -2285,6 +2749,185 @@ func (m *model) pushCmd() tea.Cmd {
 	}
 }
 
+func (m *model) pullCmd() tea.Cmd {
+	if useMockViews {
+		return m.refreshGitCmd()
+	}
+	return func() tea.Msg {
+		if err := bentodiffs.Pull(m.projectPath); err != nil {
+			return gitRefreshMsg{Err: err}
+		}
+		state, err := bentodiffs.Refresh(m.projectPath)
+		if err != nil {
+			return gitRefreshMsg{Err: err}
+		}
+		return gitRefreshMsg{State: state, Action: "pulled latest"}
+	}
+}
+
+func (m *model) fetchCmd() tea.Cmd {
+	if useMockViews {
+		return m.refreshGitCmd()
+	}
+	return func() tea.Msg {
+		if err := bentodiffs.Fetch(m.projectPath); err != nil {
+			return gitRefreshMsg{Err: err}
+		}
+		state, err := bentodiffs.Refresh(m.projectPath)
+		if err != nil {
+			return gitRefreshMsg{Err: err}
+		}
+		return gitRefreshMsg{State: state, Action: "fetched remotes"}
+	}
+}
+
+func (m *model) unstageAllCmd() tea.Cmd {
+	if useMockViews {
+		return m.refreshGitCmd()
+	}
+	return func() tea.Msg {
+		if err := bentodiffs.UnstageAll(m.projectPath); err != nil {
+			return gitRefreshMsg{Err: err}
+		}
+		state, err := bentodiffs.Refresh(m.projectPath)
+		if err != nil {
+			return gitRefreshMsg{Err: err}
+		}
+		return gitRefreshMsg{State: state, Action: "unstaged all changes"}
+	}
+}
+
+func (m *model) loadDiffHistoryCmd() tea.Cmd {
+	if useMockViews {
+		return func() tea.Msg {
+			return diffHistoryMsg{Commits: []bentodiffs.CommitInfo{{Hash: "HEAD", Message: "mock commit"}}}
+		}
+	}
+	return func() tea.Msg {
+		commits, err := bentodiffs.CommitLog(m.projectPath, 100)
+		return diffHistoryMsg{Commits: commits, Err: err}
+	}
+}
+
+func (m *model) loadBranchesCmd() tea.Cmd {
+	if useMockViews {
+		return func() tea.Msg {
+			return gitBranchesMsg{Branches: []string{"main", "feature/mock"}, Current: "main"}
+		}
+	}
+	return func() tea.Msg {
+		branches, current, err := bentodiffs.BranchList(m.projectPath)
+		return gitBranchesMsg{Branches: branches, Current: current, Err: err}
+	}
+}
+
+func (m *model) createBranchCmd(name string) tea.Cmd {
+	if useMockViews {
+		m.gitCurrentBranch = strings.TrimSpace(name)
+		return nil
+	}
+	return func() tea.Msg {
+		if err := bentodiffs.BranchCreate(m.projectPath, name); err != nil {
+			return gitRefreshMsg{Err: err}
+		}
+		state, err := bentodiffs.Refresh(m.projectPath)
+		if err != nil {
+			return gitRefreshMsg{Err: err}
+		}
+		return gitRefreshMsg{State: state, Action: "created branch " + strings.TrimSpace(name)}
+	}
+}
+
+func (m *model) switchBranchCmd(name string) tea.Cmd {
+	if useMockViews {
+		m.gitCurrentBranch = strings.TrimSpace(name)
+		m.gitView = gitViewStatus
+		return nil
+	}
+	return func() tea.Msg {
+		if err := bentodiffs.BranchSwitch(m.projectPath, name); err != nil {
+			return gitRefreshMsg{Err: err}
+		}
+		state, err := bentodiffs.Refresh(m.projectPath)
+		if err != nil {
+			return gitRefreshMsg{Err: err}
+		}
+		return gitRefreshMsg{State: state, Action: "switched to " + strings.TrimSpace(name)}
+	}
+}
+
+func (m *model) deleteBranchCmd(name string) tea.Cmd {
+	if useMockViews {
+		return nil
+	}
+	return func() tea.Msg {
+		if err := bentodiffs.BranchDelete(m.projectPath, name); err != nil {
+			return gitRefreshMsg{Err: err}
+		}
+		state, err := bentodiffs.Refresh(m.projectPath)
+		if err != nil {
+			return gitRefreshMsg{Err: err}
+		}
+		return gitRefreshMsg{State: state, Action: "deleted branch " + strings.TrimSpace(name)}
+	}
+}
+
+func (m *model) loadStashCmd() tea.Cmd {
+	if useMockViews {
+		return func() tea.Msg {
+			return gitStashMsg{Items: []string{"stash@{0}: WIP mock"}}
+		}
+	}
+	return func() tea.Msg {
+		items, err := bentodiffs.StashList(m.projectPath, 40)
+		return gitStashMsg{Items: items, Err: err}
+	}
+}
+
+func (m *model) stashPushCmd() tea.Cmd {
+	if useMockViews {
+		return m.refreshGitCmd()
+	}
+	return func() tea.Msg {
+		if err := bentodiffs.StashPush(m.projectPath, ""); err != nil {
+			return gitRefreshMsg{Err: err}
+		}
+		state, err := bentodiffs.Refresh(m.projectPath)
+		if err != nil {
+			return gitRefreshMsg{Err: err}
+		}
+		return gitRefreshMsg{State: state, Action: "stashed changes"}
+	}
+}
+
+func (m *model) stashPopCmd() tea.Cmd {
+	if useMockViews {
+		return m.refreshGitCmd()
+	}
+	return func() tea.Msg {
+		if err := bentodiffs.StashPop(m.projectPath); err != nil {
+			return gitRefreshMsg{Err: err}
+		}
+		state, err := bentodiffs.Refresh(m.projectPath)
+		if err != nil {
+			return gitRefreshMsg{Err: err}
+		}
+		return gitRefreshMsg{State: state, Action: "popped stash"}
+	}
+}
+
+func (m *model) loadGitLogCmd() tea.Cmd {
+	if useMockViews {
+		return func() tea.Msg {
+			return gitLogMsg{Commits: []bentodiffs.CommitInfo{{Hash: "HEAD", Message: "mock log"}}}
+		}
+	}
+	return func() tea.Msg {
+		commits, err := bentodiffs.CommitLog(m.projectPath, 30)
+		return gitLogMsg{Commits: commits, Err: err}
+	}
+}
+
 func (m *model) cloneRepoCmd(url, dest string) tea.Cmd {
 	return func() tea.Msg {
 		projectPath, err := bentodiffs.Clone(url, dest)
@@ -2339,12 +2982,63 @@ func diffFileIndexByPath(diffs []bdcore.DiffResult, selectedPath string) int {
 	return 0
 }
 
+func (m *model) piSessionActiveForRepo(repoPath string) bool {
+	repoPath = m.normalizeRepoPath(repoPath)
+	if repoPath == "" || m.piProc == nil || !m.piProc.Running() {
+		return false
+	}
+	return m.normalizeRepoPath(m.piRepoPath) == repoPath
+}
+
+func (m *model) sendDiffContextToPiCmd() tea.Cmd {
+	if strings.TrimSpace(m.projectPath) == "" {
+		return nil
+	}
+	selected := strings.TrimSpace(m.diff.SelectedPath)
+	return func() tea.Msg {
+		d, err := bentodiffs.DiffForFile(m.projectPath, selected)
+		if err != nil {
+			return piContextMsg{Err: err}
+		}
+		if strings.TrimSpace(d) == "" {
+			return piContextMsg{}
+		}
+		name := selected
+		if strings.TrimSpace(name) == "" {
+			name = "working tree"
+		}
+		text := fmt.Sprintf("Here is the current diff for %s:\n\n%s\n\nWhat would you like to do?", name, d)
+		return piContextMsg{Text: text}
+	}
+}
+
+func (m *model) sendStagedDiffToPiCmd() tea.Cmd {
+	if strings.TrimSpace(m.projectPath) == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		d, _, err := bentodiffs.RunGit(m.projectPath, "diff", "--cached")
+		if err != nil {
+			return piContextMsg{Err: err}
+		}
+		if strings.TrimSpace(d) == "" {
+			return piContextMsg{}
+		}
+		text := "Here is the staged diff:\n\n" + d + "\n\nWhat would you like to do?"
+		return piContextMsg{Text: text}
+	}
+}
+
 func (m *model) startPiCmd() tea.Cmd {
-	targetDir := m.projectPath
+	targetDir := m.findRepoRoot(m.projectPath)
 	if strings.TrimSpace(targetDir) == "" {
 		return func() tea.Msg {
-			return piStartMsg{Err: fmt.Errorf("no selected repository")}
+			return piStartMsg{Err: fmt.Errorf("selected path is not a git repository")}
 		}
+	}
+	m.projectPath = targetDir
+	if m.piSessionActiveForRepo(targetDir) {
+		return nil
 	}
 	return func() tea.Msg {
 		proc, err := pi.Start(targetDir)
@@ -2373,10 +3067,12 @@ func (m *model) sendPiCmd(payload any) tea.Cmd {
 
 func (m *model) stopPi() {
 	if m.piProc == nil {
+		m.piRepoPath = ""
 		return
 	}
 	m.piProc.Stop()
 	m.piProc = nil
+	m.piRepoPath = ""
 }
 
 func (m *model) quitCmd() tea.Cmd {
@@ -2403,16 +3099,15 @@ func (m *model) updatePIKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.piui.CmdPrefix = false
 		switch msg.String() {
 		case "p":
-			m.stopPi()
 			m.mode = modeProjects
 			return m, m.inputBox.Focus()
 		case "d":
-			m.stopPi()
 			m.mode = modeDiff
-			return m, m.refreshDiffCmd("", "", "")
+			m.diffView = diffViewHistory
+			return m, m.loadDiffHistoryCmd()
 		case "g":
-			m.stopPi()
 			m.mode = modeGit
+			m.gitView = gitViewStatus
 			return m, m.refreshGitCmd()
 		case "j":
 			m.piui.ScrollDown()
@@ -2450,13 +3145,15 @@ func (m *model) updatePIKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "enter":
-			// handled in general enter flow below
+			// handled below
 		}
 	}
 
 	switch msg.String() {
 	case "ctrl+c":
 		return m, m.quitCmd()
+	case "ctrl+k":
+		return m, commandpallette.Open(string(m.mode))
 	case "ctrl+g":
 		m.piui.CmdPrefix = true
 		return m, nil
@@ -2468,6 +3165,15 @@ func (m *model) updatePIKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.piui.ToggleThinking()
 		m.refreshAgentViewport()
 		return m, nil
+	case "ctrl+d":
+		m.mode = modeDiff
+		m.diffView = diffViewHistory
+		if useMockViews {
+			m.ensureDiffViewer()
+			m.diffViewer.SetDiffs(bentodiffs.MockDiffs())
+			return m, nil
+		}
+		return m, m.loadDiffHistoryCmd()
 	case "esc":
 		if m.piui.SlashActive() {
 			m.piui.Input.SetValue("")
@@ -2478,9 +3184,8 @@ func (m *model) updatePIKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.piui.Status = "aborting"
 			return m, m.sendPiCmd(pi.CmdAbort())
 		}
-		m.stopPi()
-		m.mode = modeProjects
-		return m, m.inputBox.Focus()
+		m.openPrompt(promptPIPause, "Leave PI", "session stays active • enter confirm • esc cancel", "")
+		return m, nil
 	case "s":
 		if m.piui.Streaming {
 			m.piui.SteerMode = true
@@ -2502,11 +3207,12 @@ func (m *model) updatePIKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.piui.GotoBottom()
 		m.piui.Input.SetValue("")
 		m.piui.UpdateSlashQuery("")
-		m.piui.AppendUserMessage(v)
-		m.refreshAgentViewport()
 		if handled, cmd := m.handleSlashCommand(v); handled {
+			m.refreshAgentViewport()
 			return m, cmd
 		}
+		m.piui.AppendUserMessage(v)
+		m.refreshAgentViewport()
 		if m.piui.Streaming && !m.piui.SteerMode {
 			if strings.HasPrefix(v, "/") {
 				return m, m.sendPiCmd(pi.CmdPromptWithStreamingBehavior(v, "steer"))
@@ -2610,6 +3316,100 @@ func (m *model) handlePiEvent(evt pi.PiEventMsg) tea.Cmd {
 	}
 }
 
+func (m *model) handlePaletteAction(msg commandpallette.ActionMsg) (tea.Model, tea.Cmd) {
+	switch msg.ID {
+	case "switch.projects":
+		m.mode = modeProjects
+		return m, m.inputBox.Focus()
+	case "switch.git":
+		m.mode = modeGit
+		m.gitView = gitViewStatus
+		if useMockViews {
+			m.git = bentodiffs.MockGitState()
+			return m, nil
+		}
+		return m, m.refreshGitCmd()
+	case "switch.diff":
+		m.mode = modeDiff
+		m.diffView = diffViewHistory
+		m.ensureDiffViewer()
+		if useMockViews {
+			m.diffViewer.SetDiffs(bentodiffs.MockDiffs())
+			return m, nil
+		}
+		return m, m.loadDiffHistoryCmd()
+	case "switch.pi":
+		if m.mode != modePI {
+			m.mode = modePI
+			if m.piSessionActiveForRepo(m.projectPath) {
+				return m, nil
+			}
+			return m, m.startPiCmd()
+		}
+		return m, nil
+	case "theme.open":
+		m.reloadThemeItems()
+		m.openPrompt(promptTheme, "Theme", "j/k move, enter apply, esc cancel", "")
+		return m, nil
+	case "projects.backend":
+		if m.workspaceKind == workspace.KindLocal {
+			m.workspaceKind = workspace.KindEphemeral
+		} else {
+			m.workspaceKind = workspace.KindLocal
+		}
+		if m.workspace != nil {
+			m.workspace.SetKind(m.workspaceKind)
+		}
+		m.statusMessage = "backend: " + string(m.workspaceKind)
+		return m, nil
+	case "projects.new":
+		m.openPrompt(promptNewProj, "New Project", "Enter folder path to create + git init", filepath.Join(m.localDir, "new-project"))
+		return m, m.promptInput.Focus()
+	case "projects.refresh":
+		if m.mode == modeProjects && m.picker == pickerRepos {
+			return m, m.loadReposCmd()
+		}
+		if err := m.reloadLocalEntries(); err != nil {
+			m.showError(err.Error())
+		}
+		return m, nil
+	case "projects.signout":
+		m.authToken = ""
+		m.authStatus = githubauth.StatusSignedOut
+		m.authDevice = githubauth.DeviceCode{}
+		m.repos = nil
+		m.picker = pickerLocal
+		return m, m.clearTokenCmd()
+	case "pi.new":
+		return m, m.sendPiCmd(pi.CmdNewSession())
+	case "pi.model":
+		return m, m.sendPiCmd(pi.CmdCycleModel())
+	case "pi.compact":
+		return m, m.sendPiCmd(map[string]any{"type": "compact"})
+	case "pi.tools":
+		m.piui.ToggleToolBody()
+		m.refreshAgentViewport()
+		return m, nil
+	case "pi.thinking":
+		m.piui.ToggleThinking()
+		m.refreshAgentViewport()
+		return m, nil
+	case "pi.export":
+		return m, m.sendPiCmd(map[string]any{"type": "export_html"})
+	case "pi.rename":
+		return m, m.sendPiCmd(map[string]any{"type": "set_session_name"})
+	case "git.stage_all":
+		return m, m.stageAllCmd()
+	case "git.commit":
+		m.openPrompt(promptCommit, "Commit", "Enter commit message", "")
+		return m, m.promptInput.Focus()
+	case "git.push":
+		return m, m.pushCmd()
+	default:
+		return m, nil
+	}
+}
+
 func (m *model) handleSlashCommand(input string) (bool, tea.Cmd) {
 	input = strings.TrimSpace(input)
 	if !strings.HasPrefix(input, "/") {
@@ -2620,6 +3420,9 @@ func (m *model) handleSlashCommand(input string) (bool, tea.Cmd) {
 		return false, nil
 	}
 	name := strings.ToLower(strings.TrimSpace(parts[0]))
+	if _, ok := slash.Find(name); !ok {
+		return false, nil
+	}
 	makeTracked := func(cmdName string, payload map[string]any) tea.Cmd {
 		id := m.nextSlashID()
 		payload["id"] = id
@@ -2630,12 +3433,54 @@ func (m *model) handleSlashCommand(input string) (bool, tea.Cmd) {
 	switch name {
 	case "/models":
 		return true, makeTracked(name, map[string]any{"type": "get_available_models"})
+	case "/new":
+		return true, makeTracked(name, map[string]any{"type": "new_session"})
+	case "/sessions":
+		m.piui.Messages = append(m.piui.Messages, piui.Message{Role: piui.RoleAssistant, Text: "Session browser is not exposed in the current PI RPC surface yet."})
+		m.refreshAgentViewport()
+		return true, nil
+	case "/compact":
+		return true, makeTracked(name, map[string]any{"type": "compact"})
+	case "/fork":
+		return true, makeTracked(name, map[string]any{"type": "fork"})
 	case "/state":
 		return true, makeTracked(name, pi.CmdGetState())
 	case "/stats":
 		return true, makeTracked(name, map[string]any{"type": "get_session_stats"})
 	case "/commands":
 		return true, makeTracked(name, map[string]any{"type": "get_commands"})
+	case "/thinking":
+		m.piui.ToggleThinking()
+		m.refreshAgentViewport()
+		return true, nil
+	case "/tools":
+		m.piui.ToggleToolBody()
+		m.refreshAgentViewport()
+		return true, nil
+	case "/rename":
+		return true, makeTracked(name, map[string]any{"type": "set_session_name"})
+	case "/export":
+		return true, makeTracked(name, map[string]any{"type": "export_html"})
+	case "/undo":
+		return true, makeTracked(name, map[string]any{"type": "fork"})
+	case "/theme":
+		m.reloadThemeItems()
+		m.openPrompt(promptTheme, "Theme", "j/k move, enter apply, esc cancel", "")
+		return true, nil
+	case "/help":
+		cmds := slash.Builtin()
+		lines := make([]string, 0, len(cmds)+1)
+		lines = append(lines, "Commands:")
+		for _, c := range cmds {
+			lines = append(lines, fmt.Sprintf("- %s  %s", c.Name, c.Description))
+		}
+		m.piui.Messages = append(m.piui.Messages, piui.Message{Role: piui.RoleAssistant, Text: strings.Join(lines, "\n")})
+		m.refreshAgentViewport()
+		return true, nil
+	case "/exit":
+		m.stopPi()
+		m.mode = modeProjects
+		return true, m.inputBox.Focus()
 	default:
 		return false, nil
 	}
@@ -2829,6 +3674,21 @@ func (m *model) reloadThemeItems() {
 	m.themePicker.Open()
 }
 
+func (m *model) reloadCommitPicker() {
+	items := make([]selectx.Item, 0, len(m.diffHistory))
+	for _, c := range m.diffHistory {
+		label := c.Hash
+		if c.Message != "" {
+			label = c.Hash + "  " + c.Message
+		}
+		items = append(items, selectx.Item{Label: label, Value: c.Hash})
+	}
+	m.commitPicker.SetItems(items)
+	m.commitPicker.SetSize(m.width-4, m.bodyHeight()-4)
+	m.commitPicker.Focus()
+	m.commitPicker.Open()
+}
+
 func (m *model) reloadLocalEntries() error {
 	entries, err := projects.ReadEntries(m.localDir)
 	if err != nil {
@@ -2905,6 +3765,53 @@ func inferRepoNameFromPath(path string) string {
 		}
 	}
 	return base
+}
+
+func (m *model) normalizeRepoPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(path)
+	if err == nil {
+		path = abs
+	}
+	root, _, gitErr := bentodiffs.RunGit(path, "rev-parse", "--show-toplevel")
+	if gitErr == nil {
+		root = strings.TrimSpace(root)
+		if root != "" {
+			if absRoot, err := filepath.Abs(root); err == nil {
+				return filepath.Clean(absRoot)
+			}
+			return filepath.Clean(root)
+		}
+	}
+	return filepath.Clean(path)
+}
+
+func (m *model) findRepoRoot(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(path)
+	if err == nil {
+		path = abs
+	}
+	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
+		path = filepath.Dir(path)
+	}
+	for {
+		if bentodiffs.IsGitRepo(path) {
+			return m.normalizeRepoPath(path)
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			break
+		}
+		path = parent
+	}
+	return ""
 }
 
 type staticTextModel struct {

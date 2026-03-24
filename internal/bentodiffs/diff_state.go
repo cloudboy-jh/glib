@@ -16,3 +16,12 @@ func MockDiffs() []bdcore.DiffResult {
 	}
 	return diffs
 }
+
+func DiffForFile(repoPath, filePath string) (string, error) {
+	if filePath == "" {
+		out, _, err := RunGit(repoPath, "diff", "HEAD")
+		return out, err
+	}
+	out, _, err := RunGit(repoPath, "diff", "HEAD", "--", filePath)
+	return out, err
+}

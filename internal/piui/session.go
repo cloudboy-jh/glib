@@ -8,6 +8,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	"github.com/cloudboy-jh/bentotui/registry/bricks/input"
 	"github.com/cloudboy-jh/bentotui/theme"
+	"glib/internal/slash"
 )
 
 type Session struct {
@@ -424,14 +425,13 @@ func (s *Session) HeaderRightLine() string {
 }
 
 func (s *Session) UpdateSlashQuery(input string) {
-	input = strings.TrimSpace(input)
 	if !strings.HasPrefix(input, "/") {
 		s.SlashQuery = ""
 		s.SlashMatches = nil
 		s.SlashCursor = 0
 		return
 	}
-	q := strings.TrimPrefix(strings.ToLower(input), "/")
+	q := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(input)), "/")
 	s.SlashQuery = q
 	if len(s.Commands) == 0 {
 		s.SlashMatches = nil
@@ -468,7 +468,7 @@ func (s *Session) UpdateSlashQuery(input string) {
 }
 
 func (s *Session) SlashActive() bool {
-	return strings.HasPrefix(strings.TrimSpace(s.Input.Value()), "/")
+	return strings.HasPrefix(s.Input.Value(), "/")
 }
 
 func (s *Session) MoveSlashCursor(delta int) {
@@ -660,11 +660,10 @@ func windowStart(cursor, viewRows, total int) int {
 }
 
 func mergeBuiltinSlashCommands(existing []SlashCommand) []SlashCommand {
-	builtin := []SlashCommand{
-		{Name: "/models", Description: "List available models", Source: "rpc"},
-		{Name: "/state", Description: "Show current session state", Source: "rpc"},
-		{Name: "/stats", Description: "Show session token and cost stats", Source: "rpc"},
-		{Name: "/commands", Description: "Refresh command list", Source: "rpc"},
+	b := slash.Builtin()
+	builtin := make([]SlashCommand, 0, len(b))
+	for _, c := range b {
+		builtin = append(builtin, SlashCommand{Name: c.Name, Description: c.Description, Source: "builtin"})
 	}
 	out := make([]SlashCommand, 0, len(existing)+len(builtin))
 	seen := map[string]struct{}{}
