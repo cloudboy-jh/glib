@@ -5,7 +5,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/cloudboy-jh/bentotui/registry/bricks/dialog"
-	commandpaletteflow "github.com/cloudboy-jh/bentotui/registry/recipes/command-palette-flow"
 )
 
 type ActionMsg struct {
@@ -43,9 +42,39 @@ var registry = []Command{
 	{Name: "Open Settings", Description: "Open settings", Mode: "any", ID: "settings.open"},
 }
 
-func Open(mode string) tea.Cmd {
+// Open opens the command palette dialog sized proportionally to the terminal.
+// termW and termH should be model.width and model.height.
+func Open(mode string, termW, termH int) tea.Cmd {
 	items := dialogCommands(mode)
-	return commandpaletteflow.Open(items)
+	return func() tea.Msg {
+		palette := dialog.NewCommandPalette(items)
+
+		// Wide enough for command label + right-aligned keybind without overflow.
+		// Min 60, target 2/3 terminal width, cap at 90.
+		w := termW * 2 / 3
+		if w < 60 {
+			w = 60
+		}
+		if w > 90 {
+			w = 90
+		}
+
+		// Tall enough to show all groups. Min 20, target 2/3 terminal height, cap at 36.
+		h := termH * 2 / 3
+		if h < 20 {
+			h = 20
+		}
+		if h > 36 {
+			h = 36
+		}
+
+		return dialog.Open(dialog.Custom{
+			DialogTitle: "Commands",
+			Content:     palette,
+			Width:       w,
+			Height:      h,
+		})
+	}
 }
 
 func dialogCommands(mode string) []dialog.Command {

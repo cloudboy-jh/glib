@@ -10,19 +10,17 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	bdcore "github.com/cloudboy-jh/bento-diffs/pkg/bentodiffs"
-	"github.com/cloudboy-jh/bentotui/registry/bricks/badge"
-	"github.com/cloudboy-jh/bentotui/registry/bricks/card"
 	"github.com/cloudboy-jh/bentotui/registry/bricks/dialog"
 	"github.com/cloudboy-jh/bentotui/registry/bricks/input"
 	selectx "github.com/cloudboy-jh/bentotui/registry/bricks/select"
 	"github.com/cloudboy-jh/bentotui/registry/bricks/surface"
-	wordmarkx "github.com/cloudboy-jh/bentotui/registry/bricks/wordmark"
 	"github.com/cloudboy-jh/bentotui/registry/recipes/vimstatus"
 	"github.com/cloudboy-jh/bentotui/registry/rooms"
 	"github.com/cloudboy-jh/bentotui/theme"
 	"github.com/cloudboy-jh/bentotui/theme/styles"
 	"glib/internal/bentodiffs"
 	commandpallette "glib/internal/command-pallette"
+	"glib/internal/git"
 	"glib/internal/githubauth"
 	"glib/internal/pi"
 	"glib/internal/piui"
@@ -700,7 +698,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			return m, m.quitCmd()
 		case "ctrl+space":
-			return m, commandpallette.Open(string(m.mode))
+			return m, commandpallette.Open(string(m.mode), m.width, m.height)
 		case "q":
 			if m.mode == modeProjects {
 				return m, m.quitCmd()
@@ -1538,23 +1536,24 @@ func (m *model) drawDiffView(surf *surface.Surface, bodyW, bodyH int, t theme.Th
 		return
 	}
 	if m.diffView == diffViewHistory {
-		contentW := max(8, bodyW-2)
+		contentW := m.projectsContentWidth()
 		listH := 5
 		commits := m.diffHistory
 		total := len(commits)
 		cur := clamp(m.diffHistoryCur, 0, max(0, total-1))
 
-		header := lipgloss.NewStyle().Bold(true).Foreground(t.TextAccent()).Render("Commit history")
-		meta := lipgloss.NewStyle().Foreground(t.TextMuted()).Render(fmt.Sprintf("%d commits", total))
-
+		// block uses Padding(0,1) + Border — inner content width is contentW-4
+		rowW := max(8, contentW-4)
 		lines := make([]string, 0, listH)
 		if total == 0 {
 			lines = append(lines, lipgloss.NewStyle().Foreground(t.TextMuted()).Render("No commits found"))
 		} else {
 			start := windowStart(cur, listH, total)
 			end := min(total, start+listH)
-			base := lipgloss.NewStyle().Width(contentW).Background(t.BackgroundPanel()).Foreground(t.Text())
+			base := lipgloss.NewStyle().Width(rowW).Background(t.BackgroundPanel()).Foreground(t.Text())
 			active := base.Copy().Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Bold(true)
+			// fixed cols: marker(2) + prefix(2) + hash(7) + sep(2) = 13
+			const fixedCols = 13
 			for i := start; i < end; i++ {
 				c := commits[i]
 				prefix := "  "
@@ -1569,14 +1568,16 @@ func (m *model) drawDiffView(surf *surface.Surface, bodyW, bodyH int, t theme.Th
 				} else if i == end-1 && end < total {
 					marker = "v "
 				}
-				hash := lipgloss.NewStyle().Foreground(t.Info()).Render(c.Hash)
-				if i == cur {
-					hash = c.Hash
-				}
-				msgW := max(8, contentW-len(c.Hash)-4)
+				msgW := max(1, rowW-fixedCols)
 				msg := truncateText(c.Message, msgW)
-				label := hash + "  " + msg
-				lines = append(lines, style.Render(fitLine(marker+prefix+label, contentW)))
+				var rowStr string
+				if i == cur {
+					rowStr = styles.ClipANSI(marker+prefix+c.Hash+"  "+msg, rowW)
+				} else {
+					coloredHash := lipgloss.NewStyle().Foreground(t.Info()).Render(c.Hash)
+					rowStr = styles.ClipANSI(marker+prefix+coloredHash+"  "+msg, rowW)
+				}
+				lines = append(lines, style.Render(rowStr))
 			}
 		}
 		for len(lines) < listH {
@@ -1584,6 +1585,8 @@ func (m *model) drawDiffView(surf *surface.Surface, bodyW, bodyH int, t theme.Th
 			lines = append(lines, base.Render(""))
 		}
 
+		header := lipgloss.NewStyle().Foreground(t.TextAccent()).Bold(true).Render(m.icons.Diff + "  Commit History")
+		meta := lipgloss.NewStyle().Foreground(t.TextMuted()).Render(fmt.Sprintf("%d commits", total))
 		content := lipgloss.JoinVertical(lipgloss.Left, header, meta, "", strings.Join(lines, "\n"))
 		block := lipgloss.NewStyle().
 			Background(t.BackgroundPanel()).
@@ -1594,9 +1597,15 @@ func (m *model) drawDiffView(surf *surface.Surface, bodyW, bodyH int, t theme.Th
 			Render(content)
 		blockW := lipgloss.Width(block)
 		blockH := lipgloss.Height(block)
-		x := max(0, (bodyW-blockW)/2)
-		y := max(0, (bodyH-blockH)/2)
-		surf.Draw(x, y, block)
+
+		wm := lipgloss.NewStyle().Foreground(t.TextAccent()).Bold(true).Render(diffWordmark)
+		wmW := lipgloss.Width(wm)
+		wmH := lipgloss.Height(wm)
+
+		stackH := wmH + 1 + blockH
+		stackY := max(0, (bodyH-stackH)/2)
+		surf.Draw(max(0, (bodyW-wmW)/2), stackY, wm)
+		surf.Draw(max(0, (bodyW-blockW)/2), stackY+wmH+1, block)
 		return
 	}
 	if m.diffViewer == nil {
@@ -1623,198 +1632,16 @@ func (m *model) drawGitView(surf *surface.Surface, bodyW, bodyH int, t theme.The
 		return
 	}
 
-	if m.gitView == gitViewBranches {
-		contentW := max(8, bodyW-2)
-		lines := []string{lipgloss.NewStyle().Bold(true).Foreground(t.TextAccent()).Render("Branches")}
-		if len(m.gitBranches) == 0 {
-			lines = append(lines, lipgloss.NewStyle().Foreground(t.TextMuted()).Render("No local branches"))
-		} else {
-			for i, b := range m.gitBranches {
-				prefix := "  "
-				if b == m.gitCurrentBranch {
-					prefix = "* "
-				}
-				line := prefix + b
-				if i == m.gitBranchCursor {
-					line = lipgloss.NewStyle().Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Render(fitLine(line, contentW))
-				}
-				lines = append(lines, fitLine(line, contentW))
-			}
-		}
-		surf.Draw(1, 1, strings.Join(lines, "\n"))
-		return
+	switch m.gitView {
+	case gitViewBranches:
+		surf.Draw(0, 0, git.RenderBranchesView(m.gitBranches, m.gitCurrentBranch, m.gitBranchCursor, bodyW, bodyH, t))
+	case gitViewStash:
+		surf.Draw(0, 0, git.RenderStashView(m.gitStash, m.gitStashCursor, bodyW, bodyH, t))
+	case gitViewLog:
+		surf.Draw(0, 0, git.RenderLogView(m.gitLog, m.gitLogCursor, bodyW, bodyH, t))
+	default:
+		surf.Draw(0, 0, git.RenderStatusView(m.git, bodyW, bodyH, t))
 	}
-	if m.gitView == gitViewStash {
-		contentW := max(8, bodyW-2)
-		lines := []string{lipgloss.NewStyle().Bold(true).Foreground(t.TextAccent()).Render("Stash")}
-		if len(m.gitStash) == 0 {
-			lines = append(lines, lipgloss.NewStyle().Foreground(t.TextMuted()).Render("No stashes"))
-		} else {
-			for i, item := range m.gitStash {
-				line := item
-				if i == m.gitStashCursor {
-					line = lipgloss.NewStyle().Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Render(fitLine(line, contentW))
-				}
-				lines = append(lines, fitLine(line, contentW))
-			}
-		}
-		surf.Draw(1, 1, strings.Join(lines, "\n"))
-		return
-	}
-	if m.gitView == gitViewLog {
-		contentW := max(8, bodyW-2)
-		lines := []string{lipgloss.NewStyle().Bold(true).Foreground(t.TextAccent()).Render("Commit log")}
-		if len(m.gitLog) == 0 {
-			lines = append(lines, lipgloss.NewStyle().Foreground(t.TextMuted()).Render("No commits"))
-		} else {
-			for i, c := range m.gitLog {
-				line := c.Hash + "  " + c.Message
-				if i == m.gitLogCursor {
-					line = lipgloss.NewStyle().Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Render(fitLine(line, contentW))
-				}
-				lines = append(lines, fitLine(line, contentW))
-			}
-		}
-		surf.Draw(1, 1, strings.Join(lines, "\n"))
-		return
-	}
-
-	wm := wordmarkx.New("glib")
-	wm.SetBold(true)
-	tag := badge.New("GIT")
-	tag.SetVariant(badge.VariantAccent)
-	tag.SetBold(true)
-
-	branchLine := lipgloss.NewStyle().Foreground(t.TextAccent()).Bold(true).Render(m.git.Branch)
-	track := m.git.Tracking
-	if track == "" {
-		track = "(no upstream)"
-	}
-	sync := ""
-	if m.git.Ahead > 0 {
-		sync += lipgloss.NewStyle().Foreground(t.Success()).Render(fmt.Sprintf(" ↑%d", m.git.Ahead))
-	}
-	if m.git.Behind > 0 {
-		sync += lipgloss.NewStyle().Foreground(t.Warning()).Render(fmt.Sprintf(" ↓%d", m.git.Behind))
-	}
-	rows := m.git.Rows()
-	headerLine := branchLine + lipgloss.NewStyle().Foreground(t.TextMuted()).Render(" <- "+track) + sync
-	summary := lipgloss.NewStyle().Foreground(t.TextMuted()).Render(
-		fmt.Sprintf("%d changed  %d staged  +%d -%d", m.git.ChangedTotal, m.git.StagedTotal, m.git.AddedTotal, m.git.DeletedTotal),
-	)
-
-	last := ""
-	if m.git.LastCommit.Hash != "" {
-		last = lipgloss.NewStyle().Foreground(t.Info()).Render(m.git.LastCommit.Hash) +
-			"  " + m.git.LastCommit.Message + "  " + lipgloss.NewStyle().Foreground(t.TextMuted()).Render("· "+bentodiffs.RelativeTime(m.git.LastCommit.Time))
-	}
-
-	leftPane := rooms.RenderFunc(func(w, h int) string {
-		contentW := max(8, w-2)
-		contentH := max(1, h-2)
-		headerRows := 3
-		listH := max(1, contentH-headerRows)
-		start := windowStart(m.git.Cursor, listH, len(rows))
-		end := min(len(rows), start+listH)
-
-		lines := []string{
-			fitLine(headerLine, contentW),
-			fitLine(summary, contentW),
-			"",
-		}
-
-		for i := start; i < end; i++ {
-			row := rows[i]
-			if row.IsHeader() {
-				line := lipgloss.NewStyle().Foreground(t.TextMuted()).Bold(true).Render(strings.ToUpper(row.Label))
-				lines = append(lines, fitLine(line, contentW))
-				continue
-			}
-			f := row.File
-			cursor := " "
-			if i == m.git.Cursor {
-				cursor = lipgloss.NewStyle().Foreground(t.TextAccent()).Bold(true).Render("▸")
-			}
-			statusStyle := lipgloss.NewStyle().Foreground(t.TextMuted())
-			switch f.Status {
-			case "M":
-				statusStyle = statusStyle.Foreground(t.Warning())
-			case "A":
-				statusStyle = statusStyle.Foreground(t.Success())
-			case "D":
-				statusStyle = statusStyle.Foreground(t.Error())
-			case "R":
-				statusStyle = statusStyle.Foreground(t.Info())
-			}
-			path := truncateText(f.Path, max(8, contentW-20))
-			stats := lipgloss.NewStyle().Foreground(t.Success()).Render(fmt.Sprintf("+%d", f.Added)) +
-				" " + lipgloss.NewStyle().Foreground(t.Error()).Render(fmt.Sprintf("-%d", f.Deleted))
-			left := fmt.Sprintf("%s %s  %s", cursor, statusStyle.Render(f.Status), path)
-			pad := max(1, contentW-lipgloss.Width(left)-lipgloss.Width(stats)-1)
-			line := left + strings.Repeat(" ", pad) + stats
-			if i == m.git.Cursor {
-				line = lipgloss.NewStyle().Background(t.BackgroundInteractive()).Width(contentW).Render(line)
-			}
-			lines = append(lines, fitLine(line, contentW))
-		}
-
-		content := &staticTextModel{text: strings.Join(lines, "\n")}
-		p := card.New(
-			card.Title(fmt.Sprintf("%s  %s", viewString(wm.View()), viewString(tag.View()))),
-			card.Content(content),
-			card.Raised(),
-		)
-		p.SetSize(w, h)
-		return viewString(p.View())
-	})
-
-	rightPane := rooms.RenderFunc(func(w, h int) string {
-		contentW := max(8, w-2)
-		selectedPath := ""
-		selectedStatus := ""
-		selectedStats := ""
-		if f, ok := m.git.SelectedFile(); ok {
-			selectedPath = f.Path
-			selectedStatus = f.Status
-			selectedStats = fmt.Sprintf("+%d -%d", f.Added, f.Deleted)
-		}
-
-		statusBadge := badge.New(strings.TrimSpace(selectedStatus))
-		statusBadge.SetVariant(badge.VariantNeutral)
-		if selectedStatus == "A" {
-			statusBadge.SetVariant(badge.VariantSuccess)
-		}
-		if selectedStatus == "M" {
-			statusBadge.SetVariant(badge.VariantWarning)
-		}
-		if selectedStatus == "D" {
-			statusBadge.SetVariant(badge.VariantDanger)
-		}
-		if selectedStatus == "R" {
-			statusBadge.SetVariant(badge.VariantInfo)
-		}
-
-		lines := []string{
-			fitLine(lipgloss.NewStyle().Bold(true).Render(truncateText(selectedPath, contentW)), contentW),
-			fitLine(lipgloss.NewStyle().Foreground(t.TextMuted()).Render("status ")+viewString(statusBadge.View()), contentW),
-			fitLine(lipgloss.NewStyle().Foreground(t.TextMuted()).Render("stats "+selectedStats), contentW),
-			"",
-		}
-		if last != "" {
-			lines = append(lines,
-				fitLine(lipgloss.NewStyle().Foreground(t.TextMuted()).Render("last commit"), contentW),
-				fitLine(last, contentW),
-			)
-		}
-
-		content := &staticTextModel{text: strings.Join(lines, "\n")}
-		p := card.New(card.Title("Selection"), card.Content(content), card.Raised())
-		p.SetSize(w, h)
-		return viewString(p.View())
-	})
-
-	split := rooms.HSplit(bodyW, bodyH, leftPane, rightPane)
-	surf.Draw(0, 0, split)
 }
 
 func (m *model) drawPIView(surf *surface.Surface, bodyH int, t theme.Theme) {
@@ -2421,7 +2248,7 @@ func resolveIcons() iconSet {
 		Dot:      "\uea71", // nf-cod-circle_filled
 		PI:       "π",
 		Diff:     "\ueae1", // nf-cod-diff
-		Git:      "\uea68", // nf-cod-source_control
+		Git:      "\ue725", // nf-dev-git_branch  (gh-dash style)
 		Quit:     "\uea76", // nf-cod-close
 		Prompt:   "\ueab6", // nf-cod-chevron_right
 	}
@@ -3294,7 +3121,7 @@ func (m *model) updatePIKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		return m, m.quitCmd()
 	case "ctrl+space":
-		return m, commandpallette.Open(string(m.mode))
+		return m, commandpallette.Open(string(m.mode), m.width, m.height)
 	case "ctrl+g":
 		m.piui.CmdPrefix = true
 		return m, nil

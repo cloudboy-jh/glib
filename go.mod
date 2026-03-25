@@ -7,7 +7,7 @@ require (
 	charm.land/bubbletea/v2 v2.0.0-rc.2
 	charm.land/lipgloss/v2 v2.0.0-beta.3.0.20251106192539-4b304240aab7
 	github.com/cloudboy-jh/bento-diffs v0.0.0-20260320014314-5dfc7ca4b000
-	github.com/cloudboy-jh/bentotui v0.6.0
+	github.com/cloudboy-jh/bentotui v0.6.1
 )
 
 require (
