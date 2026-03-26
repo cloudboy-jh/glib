@@ -40,18 +40,19 @@ func RenderHistory(messages []Message, width int, t theme.Theme) string {
 		width = 4
 	}
 	out := make([]string, 0, len(messages)*2)
-	for _, msg := range messages {
+	for i, msg := range messages {
+		if i == 0 && msg.Role == RoleUser {
+			out = append(out, "")
+		}
 		switch msg.Role {
 		case RoleUser:
-			prefix := lipgloss.NewStyle().Foreground(t.TextMuted()).Render(">")
-			text := lipgloss.NewStyle().Foreground(t.TextMuted()).Render(clipWrap(msg.Text, max(8, width-4)))
-			out = append(out, clipWrap(prefix+" "+text, width-1))
+			out = append(out, renderUserCard(msg.Text, width, t))
 		case RoleAssistant:
-			text := renderAssistantText(msg.Text, width-1, t)
+			text := renderAssistantText(msg.Text, width-3, t)
 			if msg.Streaming {
 				text += lipgloss.NewStyle().Foreground(t.BorderFocus()).Render("▋")
 			}
-			out = append(out, clipWrap(text, width))
+			out = append(out, renderAssistantBlock(text, width, t))
 		case RoleTool:
 			if msg.ToolBlock == nil {
 				continue
@@ -67,9 +68,11 @@ func RenderHistory(messages []Message, width int, t theme.Theme) string {
 			}
 			out = append(out, strings.Join(block, "\n"))
 		}
-		out = append(out, "")
+		if i < len(messages)-1 {
+			out = append(out, "")
+		}
 	}
-	return strings.TrimSpace(strings.Join(out, "\n"))
+	return strings.TrimRight(strings.Join(out, "\n"), "\n")
 }
 
 func toolHeader(tb *ToolBlock) string {
@@ -167,11 +170,11 @@ func renderAssistantText(v string, width int, t theme.Theme) string {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") {
 			clean := strings.TrimSpace(strings.TrimLeft(trimmed, "#"))
-			out = append(out, lipgloss.NewStyle().Bold(true).Foreground(t.TextMuted()).Render(clean))
+			out = append(out, lipgloss.NewStyle().Bold(true).Foreground(t.TextAccent()).Render(clean))
 			continue
 		}
 		if strings.HasPrefix(trimmed, "- ") {
-			bullet := lipgloss.NewStyle().Foreground(t.TextMuted()).Render("•")
+			bullet := lipgloss.NewStyle().Foreground(t.TextAccent()).Render("•")
 			body := renderInlineMarkdown(strings.TrimSpace(strings.TrimPrefix(trimmed, "- ")), t)
 			out = append(out, bullet+" "+body)
 			continue
@@ -189,7 +192,7 @@ func renderInlineMarkdown(v string, t theme.Theme) string {
 	b := strings.Builder{}
 	for i, part := range parts {
 		if i%2 == 1 {
-			chunk := lipgloss.NewStyle().Background(t.BackgroundPanel()).Foreground(t.SyntaxString()).Render(part)
+			chunk := lipgloss.NewStyle().Foreground(t.SyntaxString()).Render(part)
 			b.WriteString(chunk)
 			continue
 		}
@@ -197,4 +200,43 @@ func renderInlineMarkdown(v string, t theme.Theme) string {
 		b.WriteString(lipgloss.NewStyle().Foreground(t.Text()).Render(plain))
 	}
 	return b.String()
+}
+
+func renderUserCard(text string, width int, t theme.Theme) string {
+	innerW := maxInt(8, width-2)
+	body := clipWrap(strings.TrimSpace(text), innerW-2)
+	if strings.TrimSpace(body) == "" {
+		body = " "
+	}
+	content := lipgloss.NewStyle().Foreground(t.Text()).Render(body)
+	return lipgloss.NewStyle().
+		Background(t.BackgroundPanel()).
+		Border(lipgloss.Border{Left: "┃"}, false, false, false, true).
+		BorderForeground(t.BorderFocus()).
+		PaddingTop(1).
+		PaddingBottom(1).
+		PaddingLeft(1).
+		PaddingRight(1).
+		Width(innerW).
+		Render(content)
+}
+
+func renderAssistantBlock(text string, width int, t theme.Theme) string {
+	innerW := maxInt(8, width-2)
+	if strings.TrimSpace(text) == "" {
+		text = " "
+	}
+	body := clipWrap(text, innerW-2)
+	return lipgloss.NewStyle().
+		Foreground(t.Text()).
+		PaddingLeft(3).
+		Width(innerW).
+		Render(body)
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

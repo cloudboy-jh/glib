@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"glib/internal/bentodiffs"
+	"glib/internal/git"
 )
 
 type Kind string
@@ -55,14 +55,14 @@ func (m *Manager) EnsureRepo(fullName, cloneURL string) (string, error) {
 		safeName = "repo"
 	}
 	repoRoot := filepath.Join(m.Root, safeName)
-	if bentodiffs.IsGitRepo(repoRoot) {
+	if git.IsGitRepo(repoRoot) {
 		if m.Kind == KindEphemeral {
 			worktreeRoot := filepath.Join(m.Root, safeName+"-worktrees")
 			if err := os.MkdirAll(worktreeRoot, 0o755); err != nil {
 				return "", err
 			}
 			worktreePath := filepath.Join(worktreeRoot, time.Now().UTC().Format("20060102-150405"))
-			if _, _, err := bentodiffs.RunGit(repoRoot, "worktree", "add", "--detach", worktreePath); err != nil {
+			if _, _, err := git.RunGit(repoRoot, "worktree", "add", "--detach", worktreePath); err != nil {
 				return "", err
 			}
 			m.ephemeral[safeName] = worktreePath
@@ -73,7 +73,7 @@ func (m *Manager) EnsureRepo(fullName, cloneURL string) (string, error) {
 
 	if m.Kind == KindEphemeral {
 		if existing := strings.TrimSpace(m.ephemeral[safeName]); existing != "" {
-			if bentodiffs.IsGitRepo(existing) {
+			if git.IsGitRepo(existing) {
 				return existing, nil
 			}
 			delete(m.ephemeral, safeName)
@@ -89,7 +89,7 @@ func (m *Manager) EnsureRepo(fullName, cloneURL string) (string, error) {
 			return "", err
 		}
 		worktreePath := filepath.Join(worktreeRoot, time.Now().UTC().Format("20060102-150405"))
-		if _, _, err := bentodiffs.RunGit(base, "worktree", "add", "--detach", worktreePath); err != nil {
+		if _, _, err := git.RunGit(base, "worktree", "add", "--detach", worktreePath); err != nil {
 			return "", err
 		}
 		m.ephemeral[safeName] = worktreePath
@@ -103,10 +103,10 @@ func (m *Manager) EnsureRepo(fullName, cloneURL string) (string, error) {
 		return "", err
 	}
 	dest := filepath.Join(repoRoot, "main")
-	if bentodiffs.IsGitRepo(dest) {
+	if git.IsGitRepo(dest) {
 		return dest, nil
 	}
-	return bentodiffs.Clone(cloneURL, dest)
+	return git.Clone(cloneURL, dest)
 }
 
 func (m *Manager) CleanupEphemeral() CleanupResult {
@@ -125,11 +125,11 @@ func (m *Manager) CleanupEphemeral() CleanupResult {
 		if path == "" {
 			continue
 		}
-		if !bentodiffs.IsGitRepo(path) {
+		if !git.IsGitRepo(path) {
 			delete(m.ephemeral, name)
 			continue
 		}
-		out, _, err := bentodiffs.RunGit(path, "status", "--porcelain")
+		out, _, err := git.RunGit(path, "status", "--porcelain")
 		if err != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("%s: status check failed: %v", name, err))
 			result.Skipped = append(result.Skipped, path)
@@ -141,7 +141,7 @@ func (m *Manager) CleanupEphemeral() CleanupResult {
 			continue
 		}
 		base := resolveWorktreeBase(path)
-		if _, _, err := bentodiffs.RunGit(base, "worktree", "remove", path); err != nil {
+		if _, _, err := git.RunGit(base, "worktree", "remove", path); err != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("%s: remove failed: %v", name, err))
 			result.Skipped = append(result.Skipped, path)
 			continue
@@ -157,7 +157,7 @@ func (m *Manager) CleanupEphemeral() CleanupResult {
 		}
 		if strings.Contains(path, "worktree") {
 			base := resolveWorktreeBase(path)
-			_, _, _ = bentodiffs.RunGit(base, "worktree", "prune")
+			_, _, _ = git.RunGit(base, "worktree", "prune")
 		}
 	}
 
@@ -169,8 +169,8 @@ func (m *Manager) ensureBaseClone(repoRoot, cloneURL string) (string, error) {
 		return "", err
 	}
 	base := filepath.Join(repoRoot, "base")
-	if bentodiffs.IsGitRepo(base) {
-		if _, _, err := bentodiffs.RunGit(base, "fetch", "--all", "--prune"); err != nil {
+	if git.IsGitRepo(base) {
+		if _, _, err := git.RunGit(base, "fetch", "--all", "--prune"); err != nil {
 			return "", err
 		}
 		return base, nil
@@ -178,14 +178,14 @@ func (m *Manager) ensureBaseClone(repoRoot, cloneURL string) (string, error) {
 	if _, err := os.Stat(base); err == nil {
 		return "", fmt.Errorf("base path exists and is not a git repo: %s", base)
 	}
-	if _, err := bentodiffs.Clone(cloneURL, base); err != nil {
+	if _, err := git.Clone(cloneURL, base); err != nil {
 		return "", err
 	}
 	return base, nil
 }
 
 func resolveWorktreeBase(worktreePath string) string {
-	common, _, err := bentodiffs.RunGit(worktreePath, "rev-parse", "--git-common-dir")
+	common, _, err := git.RunGit(worktreePath, "rev-parse", "--git-common-dir")
 	if err == nil {
 		common = strings.TrimSpace(common)
 		if common != "" {

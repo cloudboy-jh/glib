@@ -1,6 +1,9 @@
-package bentodiffs
+package diffs
 
-import bdcore "github.com/cloudboy-jh/bento-diffs/pkg/bentodiffs"
+import (
+	bdcore "github.com/cloudboy-jh/bento-diffs/pkg/bentodiffs"
+	"glib/internal/git"
+)
 
 type DiffState struct {
 	Source       string
@@ -19,9 +22,9 @@ func MockDiffs() []bdcore.DiffResult {
 
 func DiffForFile(repoPath, filePath string) (string, error) {
 	if filePath == "" {
-		out, _, err := RunGit(repoPath, "diff", "HEAD")
+		out, _, err := git.RunGit(repoPath, "diff", "HEAD")
 		return out, err
 	}
-	out, _, err := RunGit(repoPath, "diff", "HEAD", "--", filePath)
+	out, _, err := git.RunGit(repoPath, "diff", "HEAD", "--", filePath)
 	return out, err
 }

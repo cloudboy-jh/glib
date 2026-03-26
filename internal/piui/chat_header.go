@@ -10,12 +10,9 @@ import (
 )
 
 func (s *Session) HeaderLine(icon, repo string, width int, t theme.Theme) string {
-	left := strings.TrimSpace(icon)
-	if left == "" {
-		left = "PI"
-	}
+	left := "# session"
 	if strings.TrimSpace(repo) != "" {
-		left += " " + strings.TrimSpace(repo)
+		left = "# " + strings.TrimSpace(repo)
 	}
 	right := strings.TrimSpace(s.HeaderRightLine())
 	b := bar.New(

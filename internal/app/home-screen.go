@@ -18,8 +18,8 @@ import (
 	"github.com/cloudboy-jh/bentotui/registry/rooms"
 	"github.com/cloudboy-jh/bentotui/theme"
 	"github.com/cloudboy-jh/bentotui/theme/styles"
-	"glib/internal/bentodiffs"
 	commandpallette "glib/internal/command-pallette"
+	"glib/internal/diffs"
 	"glib/internal/git"
 	"glib/internal/githubauth"
 	"glib/internal/pi"
@@ -41,14 +41,6 @@ const glibWordmark = "" +
 	"██║   ██║██║     ██║██╔══██╗\n" +
 	"╚██████╔╝███████╗██║██████╔╝\n" +
 	" ╚═════╝ ╚══════╝╚═╝╚═════╝ "
-
-const diffWordmark = "" +
-	"██████╗  ██╗███████╗███████╗\n" +
-	"██╔══██╗ ██║██╔════╝██╔════╝\n" +
-	"██║  ██║ ██║█████╗  █████╗  \n" +
-	"██║  ██║ ██║██╔══╝  ██╔══╝  \n" +
-	"██████╔╝ ██║██║     ██║     \n" +
-	"╚═════╝  ╚═╝╚═╝     ╚═╝     "
 
 type appMode string
 
@@ -99,7 +91,7 @@ const (
 )
 
 type gitRefreshMsg struct {
-	State  bentodiffs.GitState
+	State  git.GitState
 	Action string
 	Err    error
 }
@@ -119,7 +111,7 @@ type cloneDoneMsg struct {
 }
 
 type diffHistoryMsg struct {
-	Commits []bentodiffs.CommitInfo
+	Commits []git.CommitInfo
 	Err     error
 }
 
@@ -135,7 +127,7 @@ type gitStashMsg struct {
 }
 
 type gitLogMsg struct {
-	Commits []bentodiffs.CommitInfo
+	Commits []git.CommitInfo
 	Err     error
 }
 
@@ -220,11 +212,11 @@ type model struct {
 	promptHint       string
 	pendingURL       string
 	pendingPath      string
-	git              bentodiffs.GitState
-	diff             bentodiffs.DiffState
+	git              git.GitState
+	diff             diffs.DiffState
 	diffViewer       bdcore.Viewer
 	diffView         diffViewMode
-	diffHistory      []bentodiffs.CommitInfo
+	diffHistory      []git.CommitInfo
 	diffHistoryCur   int
 	piProc           *pi.PiProcess
 	piRepoPath       string
@@ -260,7 +252,7 @@ type model struct {
 	gitBranchCursor  int
 	gitStash         []string
 	gitStashCursor   int
-	gitLog           []bentodiffs.CommitInfo
+	gitLog           []git.CommitInfo
 	gitLogCursor     int
 }
 
@@ -298,7 +290,7 @@ func NewModel() *model {
 		localDir:      cwd,
 		localExpanded: map[string]bool{},
 		icons:         resolveIcons(),
-		diff:          bentodiffs.DiffState{},
+		diff:          diffs.DiffState{},
 		diffView:      diffViewHistory,
 		gitView:       gitViewStatus,
 		authStatus:    githubauth.StatusSignedOut,
@@ -314,8 +306,8 @@ func NewModel() *model {
 	}
 	if useMockViews {
 		m.ensureDiffViewer()
-		m.diffViewer.SetDiffs(bentodiffs.MockDiffs())
-		m.git = bentodiffs.MockGitState()
+		m.diffViewer.SetDiffs(diffs.MockDiffs())
+		m.git = git.MockGitState()
 	}
 	_ = m.reloadLocalEntries()
 	return m
@@ -451,12 +443,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.gitView = gitViewLog
 		return m, nil
 
-	case bentodiffs.OpenDiffMsg:
+	case git.OpenDiffMsg:
 		m.mode = modeDiff
 		m.diffView = diffViewOpen
 		m.ensureDiffViewer()
 		if useMockViews {
-			m.diffViewer.SetDiffs(bentodiffs.MockDiffs())
+			m.diffViewer.SetDiffs(diffs.MockDiffs())
 			return m, nil
 		}
 		if m.projectPath == "" {
@@ -495,14 +487,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.diffView = diffViewHistory
 			m.ensureDiffViewer()
 			if useMockViews {
-				m.diffViewer.SetDiffs(bentodiffs.MockDiffs())
+				m.diffViewer.SetDiffs(diffs.MockDiffs())
 				return m, nil
 			}
 			return m, m.loadDiffHistoryCmd()
 		case "git":
 			m.mode = modeGit
 			if useMockViews {
-				m.git = bentodiffs.MockGitState()
+				m.git = git.MockGitState()
 				return m, nil
 			}
 			return m, m.refreshGitCmd()
@@ -726,7 +718,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.mode == modeProjects && m.picker == pickerRepos {
 				repo, ok := m.selectedRepo()
 				if ok {
-					if m.activeRepoName == repo.FullName && strings.TrimSpace(m.projectPath) != "" && bentodiffs.IsGitRepo(m.projectPath) {
+					if m.activeRepoName == repo.FullName && strings.TrimSpace(m.projectPath) != "" && git.IsGitRepo(m.projectPath) {
 						m.mode = modePI
 						if m.piSessionActiveForRepo(m.projectPath) {
 							return m, nil
@@ -762,7 +754,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.diffView = diffViewHistory
 			m.ensureDiffViewer()
 			if useMockViews {
-				m.diffViewer.SetDiffs(bentodiffs.MockDiffs())
+				m.diffViewer.SetDiffs(diffs.MockDiffs())
 				return m, nil
 			}
 			if m.projectPath == "" {
@@ -772,7 +764,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "G":
 			m.mode = modeGit
 			if useMockViews {
-				m.git = bentodiffs.MockGitState()
+				m.git = git.MockGitState()
 				return m, nil
 			}
 			return m, m.refreshGitCmd()
@@ -784,7 +776,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.diffView = diffViewHistory
 			m.ensureDiffViewer()
 			if useMockViews {
-				m.diffViewer.SetDiffs(bentodiffs.MockDiffs())
+				m.diffViewer.SetDiffs(diffs.MockDiffs())
 				return m, nil
 			}
 			if m.projectPath == "" {
@@ -797,7 +789,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.mode = modeGit
 			if useMockViews {
-				m.git = bentodiffs.MockGitState()
+				m.git = git.MockGitState()
 				return m, nil
 			}
 			return m, m.refreshGitCmd()
@@ -1032,7 +1024,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mode = modeGit
 				m.gitView = gitViewStatus
 				if useMockViews {
-					m.git = bentodiffs.MockGitState()
+					m.git = git.MockGitState()
 					return m, nil
 				}
 				return m, m.refreshGitCmd()
@@ -1536,94 +1528,12 @@ func (m *model) drawDiffView(surf *surface.Surface, bodyW, bodyH int, t theme.Th
 		return
 	}
 	if m.diffView == diffViewHistory {
-		contentW := m.projectsContentWidth()
-		listH := 5
-		commits := m.diffHistory
-		total := len(commits)
-		cur := clamp(m.diffHistoryCur, 0, max(0, total-1))
-
-		// block uses Padding(0,1) + Border — inner content width is contentW-4
-		rowW := max(8, contentW-4)
-		lines := make([]string, 0, listH)
-		if total == 0 {
-			lines = append(lines, lipgloss.NewStyle().Foreground(t.TextMuted()).Render("No commits found"))
-		} else {
-			start := windowStart(cur, listH, total)
-			end := min(total, start+listH)
-			base := lipgloss.NewStyle().Width(rowW).Background(t.BackgroundPanel()).Foreground(t.Text())
-			active := base.Copy().Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Bold(true)
-			// fixed cols: marker(2) + prefix(2) + hash(7) + sep(2) = 13
-			const fixedCols = 13
-			for i := start; i < end; i++ {
-				c := commits[i]
-				prefix := "  "
-				marker := "  "
-				style := base
-				if i == cur {
-					prefix = "> "
-					style = active
-				}
-				if i == start && start > 0 {
-					marker = "^ "
-				} else if i == end-1 && end < total {
-					marker = "v "
-				}
-				msgW := max(1, rowW-fixedCols)
-				msg := truncateText(c.Message, msgW)
-				var rowStr string
-				if i == cur {
-					rowStr = styles.ClipANSI(marker+prefix+c.Hash+"  "+msg, rowW)
-				} else {
-					coloredHash := lipgloss.NewStyle().Foreground(t.Info()).Render(c.Hash)
-					rowStr = styles.ClipANSI(marker+prefix+coloredHash+"  "+msg, rowW)
-				}
-				lines = append(lines, style.Render(rowStr))
-			}
-		}
-		for len(lines) < listH {
-			base := lipgloss.NewStyle().Width(contentW).Background(t.BackgroundPanel())
-			lines = append(lines, base.Render(""))
-		}
-
-		header := lipgloss.NewStyle().Foreground(t.TextAccent()).Bold(true).Render(m.icons.Diff + "  Commit History")
-		meta := lipgloss.NewStyle().Foreground(t.TextMuted()).Render(fmt.Sprintf("%d commits", total))
-		content := lipgloss.JoinVertical(lipgloss.Left, header, meta, "", strings.Join(lines, "\n"))
-		block := lipgloss.NewStyle().
-			Background(t.BackgroundPanel()).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(t.BorderFocus()).
-			Padding(0, 1).
-			Width(contentW).
-			Render(content)
-		blockW := lipgloss.Width(block)
-		blockH := lipgloss.Height(block)
-
-		wm := lipgloss.NewStyle().Foreground(t.TextAccent()).Bold(true).Render(diffWordmark)
-		wmW := lipgloss.Width(wm)
-		wmH := lipgloss.Height(wm)
-
-		stackH := wmH + 1 + blockH
-		stackY := max(0, (bodyH-stackH)/2)
-		surf.Draw(max(0, (bodyW-wmW)/2), stackY, wm)
-		surf.Draw(max(0, (bodyW-blockW)/2), stackY+wmH+1, block)
+		r := diffs.RenderHistory(m.diffHistory, m.diffHistoryCur, m.projectsContentWidth(), bodyW, bodyH, m.icons.Diff, t)
+		surf.Draw(r.WordmarkX, r.Y, r.Wordmark)
+		surf.Draw(r.BlockX, r.Y+lipgloss.Height(r.Wordmark)+1, r.Block)
 		return
 	}
-	if m.diffViewer == nil {
-		m.ensureDiffViewer()
-	}
-
-	m.diffViewer.SetSize(max(1, bodyW), max(1, bodyH))
-	m.diffViewer.SetTheme(t)
-	viewer := strings.TrimRight(m.diffViewer.View(), "\n")
-	if viewer == "" {
-		surf.Draw(2, 1, lipgloss.NewStyle().Foreground(t.TextMuted()).Render("no open changes  c commit history"))
-		return
-	}
-	lines := strings.Split(viewer, "\n")
-	if len(lines) > 1 {
-		lines = lines[:len(lines)-1]
-	}
-	surf.Draw(0, 0, strings.Join(lines, "\n"))
+	surf.Draw(0, 0, diffs.RenderOpen(m.diffViewer, bodyW, bodyH, t))
 }
 
 func (m *model) drawGitView(surf *surface.Surface, bodyW, bodyH int, t theme.Theme) {
@@ -1660,7 +1570,7 @@ func (m *model) drawPIView(surf *surface.Surface, bodyH int, t theme.Theme) {
 	}
 	surf.Draw(0, vh+1, bottom)
 
-	headerRows := 1
+	headerRows := 3
 	inputRows := m.piInputRows(max(8, vw-4))
 	slashRows := m.piui.SlashRows(8)
 	slashPanelH := 0
@@ -1680,7 +1590,16 @@ func (m *model) drawPIView(surf *surface.Surface, bodyH int, t theme.Theme) {
 
 	repoLabel := m.currentRepoLabel()
 	headerRow := m.piui.HeaderLine(m.icons.PI, repoLabel, max(1, vw-2), t)
-	surf.Draw(1, 1, fitLine(headerRow, vw))
+	headerFill := lipgloss.NewStyle().Background(t.BackgroundPanel()).Width(vw).Render("")
+	headerMid := lipgloss.NewStyle().
+		Background(t.BackgroundPanel()).
+		Foreground(t.Text()).
+		PaddingLeft(2).
+		Width(vw).
+		Render(fitLine(headerRow, max(1, vw-2)))
+	surf.Draw(1, 1, headerFill)
+	surf.Draw(1, 2, headerMid)
+	surf.Draw(1, 3, headerFill)
 
 	view := strings.Split(m.piui.Viewport.View(), "\n")
 	historyStartY := 1 + headerRows
@@ -1728,7 +1647,12 @@ func (m *model) drawPIView(surf *surface.Surface, bodyH int, t theme.Theme) {
 		surf.Draw(1, panelStartY+slashPanelH-1, fitLine(hint, vw))
 	}
 
-	inputContent := fitLine(viewString(m.piui.Input.View()), max(8, vw-4))
+	spin := " "
+	if frame := m.piui.SpinnerFrame(); frame != "" {
+		spin = frame
+	}
+	inputCore := fitLine(viewString(m.piui.Input.View()), max(8, vw-6))
+	inputContent := spin + " " + inputCore
 
 	contentW := max(8, vw-2)
 	mkRow := func(content string) string {
@@ -2125,7 +2049,7 @@ func (m *model) activateLocalSelection() {
 			_ = m.reloadLocalEntries()
 			return
 		}
-		if bentodiffs.IsGitRepo(row.Path) {
+		if git.IsGitRepo(row.Path) {
 			m.projectPath = m.normalizeRepoPath(row.Path)
 			m.activeRepoName = inferRepoNameFromPath(m.projectPath)
 			m.addRecent(m.projectPath)
@@ -2495,7 +2419,7 @@ func (m *model) openRepoCmd(repo githubauth.Repo) tea.Cmd {
 func (m *model) refreshGitCmd() tea.Cmd {
 	if useMockViews {
 		return func() tea.Msg {
-			state := bentodiffs.MockGitState()
+			state := git.MockGitState()
 			state.Cursor = m.git.Cursor
 			return gitRefreshMsg{State: state}
 		}
@@ -2505,10 +2429,10 @@ func (m *model) refreshGitCmd() tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		if !bentodiffs.IsGitRepo(m.projectPath) {
+		if !git.IsGitRepo(m.projectPath) {
 			return gitRefreshMsg{Err: fmt.Errorf("not a git repo: %s", m.projectPath)}
 		}
-		state, err := bentodiffs.Refresh(m.projectPath)
+		state, err := git.Refresh(m.projectPath)
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
@@ -2520,7 +2444,7 @@ func (m *model) refreshGitCmd() tea.Cmd {
 func (m *model) refreshDiffCmd(source, commitSHA, selectedPath string) tea.Cmd {
 	if useMockViews {
 		return func() tea.Msg {
-			return diffRefreshMsg{Diffs: bentodiffs.MockDiffs(), Source: "mock", SelectedPath: selectedPath}
+			return diffRefreshMsg{Diffs: diffs.MockDiffs(), Source: "mock", SelectedPath: selectedPath}
 		}
 	}
 	if m.projectPath == "" {
@@ -2532,7 +2456,7 @@ func (m *model) refreshDiffCmd(source, commitSHA, selectedPath string) tea.Cmd {
 	}
 
 	return func() tea.Msg {
-		if !bentodiffs.IsGitRepo(m.projectPath) {
+		if !git.IsGitRepo(m.projectPath) {
 			return diffRefreshMsg{Err: fmt.Errorf("not a git repo: %s", m.projectPath)}
 		}
 		var out string
@@ -2540,11 +2464,11 @@ func (m *model) refreshDiffCmd(source, commitSHA, selectedPath string) tea.Cmd {
 		args := []string{}
 		switch source {
 		case "working":
-			working, _, wErr := bentodiffs.RunGit(m.projectPath, "diff")
+			working, _, wErr := git.RunGit(m.projectPath, "diff")
 			if wErr != nil {
 				return diffRefreshMsg{Err: wErr}
 			}
-			staged, _, sErr := bentodiffs.RunGit(m.projectPath, "diff", "--cached")
+			staged, _, sErr := git.RunGit(m.projectPath, "diff", "--cached")
 			if sErr != nil {
 				return diffRefreshMsg{Err: sErr}
 			}
@@ -2558,7 +2482,7 @@ func (m *model) refreshDiffCmd(source, commitSHA, selectedPath string) tea.Cmd {
 			args = append(args, "--", selectedPath)
 		}
 		if err == nil && out == "" && len(args) > 0 {
-			out, _, err = bentodiffs.RunGit(m.projectPath, args...)
+			out, _, err = git.RunGit(m.projectPath, args...)
 		}
 		if err != nil {
 			return diffRefreshMsg{Err: err}
@@ -2589,7 +2513,7 @@ func (m *model) refreshDiffCmd(source, commitSHA, selectedPath string) tea.Cmd {
 func (m *model) stageFileCmd() tea.Cmd {
 	if useMockViews {
 		return func() tea.Msg {
-			state := bentodiffs.MockGitState()
+			state := git.MockGitState()
 			state.Cursor = m.git.Cursor
 			return gitRefreshMsg{State: state, Action: "mock: staged file"}
 		}
@@ -2599,10 +2523,10 @@ func (m *model) stageFileCmd() tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		if err := bentodiffs.StageFile(m.projectPath, f.Path); err != nil {
+		if err := git.StageFile(m.projectPath, f.Path); err != nil {
 			return gitRefreshMsg{Err: err}
 		}
-		state, err := bentodiffs.Refresh(m.projectPath)
+		state, err := git.Refresh(m.projectPath)
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
@@ -2613,7 +2537,7 @@ func (m *model) stageFileCmd() tea.Cmd {
 func (m *model) stageAllCmd() tea.Cmd {
 	if useMockViews {
 		return func() tea.Msg {
-			state := bentodiffs.MockGitState()
+			state := git.MockGitState()
 			state.Cursor = m.git.Cursor
 			return gitRefreshMsg{State: state, Action: "mock: staged all"}
 		}
@@ -2622,10 +2546,10 @@ func (m *model) stageAllCmd() tea.Cmd {
 		if m.projectPath == "" {
 			return gitRefreshMsg{Err: fmt.Errorf("select a project first")}
 		}
-		if _, _, err := bentodiffs.RunGit(m.projectPath, "add", "-A"); err != nil {
+		if _, _, err := git.RunGit(m.projectPath, "add", "-A"); err != nil {
 			return gitRefreshMsg{Err: err}
 		}
-		state, err := bentodiffs.Refresh(m.projectPath)
+		state, err := git.Refresh(m.projectPath)
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
@@ -2636,7 +2560,7 @@ func (m *model) stageAllCmd() tea.Cmd {
 func (m *model) unstageFileCmd() tea.Cmd {
 	if useMockViews {
 		return func() tea.Msg {
-			state := bentodiffs.MockGitState()
+			state := git.MockGitState()
 			state.Cursor = m.git.Cursor
 			return gitRefreshMsg{State: state, Action: "mock: unstaged file"}
 		}
@@ -2646,10 +2570,10 @@ func (m *model) unstageFileCmd() tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		if err := bentodiffs.UnstageFile(m.projectPath, f.Path); err != nil {
+		if err := git.UnstageFile(m.projectPath, f.Path); err != nil {
 			return gitRefreshMsg{Err: err}
 		}
-		state, err := bentodiffs.Refresh(m.projectPath)
+		state, err := git.Refresh(m.projectPath)
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
@@ -2660,16 +2584,16 @@ func (m *model) unstageFileCmd() tea.Cmd {
 func (m *model) discardFileCmd(path string) tea.Cmd {
 	if useMockViews {
 		return func() tea.Msg {
-			state := bentodiffs.MockGitState()
+			state := git.MockGitState()
 			state.Cursor = m.git.Cursor
 			return gitRefreshMsg{State: state, Action: "mock: discarded " + path}
 		}
 	}
 	return func() tea.Msg {
-		if err := bentodiffs.DiscardFile(m.projectPath, path); err != nil {
+		if err := git.DiscardFile(m.projectPath, path); err != nil {
 			return gitRefreshMsg{Err: err}
 		}
-		state, err := bentodiffs.Refresh(m.projectPath)
+		state, err := git.Refresh(m.projectPath)
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
@@ -2680,16 +2604,16 @@ func (m *model) discardFileCmd(path string) tea.Cmd {
 func (m *model) commitCmd(message string) tea.Cmd {
 	if useMockViews {
 		return func() tea.Msg {
-			state := bentodiffs.MockGitState()
+			state := git.MockGitState()
 			state.Cursor = m.git.Cursor
 			return gitRefreshMsg{State: state, Action: "mock: commit created"}
 		}
 	}
 	return func() tea.Msg {
-		if err := bentodiffs.Commit(m.projectPath, message); err != nil {
+		if err := git.Commit(m.projectPath, message); err != nil {
 			return gitRefreshMsg{Err: err}
 		}
-		state, err := bentodiffs.Refresh(m.projectPath)
+		state, err := git.Refresh(m.projectPath)
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
@@ -2700,16 +2624,16 @@ func (m *model) commitCmd(message string) tea.Cmd {
 func (m *model) pushCmd() tea.Cmd {
 	if useMockViews {
 		return func() tea.Msg {
-			state := bentodiffs.MockGitState()
+			state := git.MockGitState()
 			state.Cursor = m.git.Cursor
 			return gitRefreshMsg{State: state, Action: "mock: pushed"}
 		}
 	}
 	return func() tea.Msg {
-		if err := bentodiffs.Push(m.projectPath); err != nil {
+		if err := git.Push(m.projectPath); err != nil {
 			return gitRefreshMsg{Err: err}
 		}
-		state, err := bentodiffs.Refresh(m.projectPath)
+		state, err := git.Refresh(m.projectPath)
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
@@ -2722,10 +2646,10 @@ func (m *model) pullCmd() tea.Cmd {
 		return m.refreshGitCmd()
 	}
 	return func() tea.Msg {
-		if err := bentodiffs.Pull(m.projectPath); err != nil {
+		if err := git.Pull(m.projectPath); err != nil {
 			return gitRefreshMsg{Err: err}
 		}
-		state, err := bentodiffs.Refresh(m.projectPath)
+		state, err := git.Refresh(m.projectPath)
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
@@ -2738,10 +2662,10 @@ func (m *model) fetchCmd() tea.Cmd {
 		return m.refreshGitCmd()
 	}
 	return func() tea.Msg {
-		if err := bentodiffs.Fetch(m.projectPath); err != nil {
+		if err := git.Fetch(m.projectPath); err != nil {
 			return gitRefreshMsg{Err: err}
 		}
-		state, err := bentodiffs.Refresh(m.projectPath)
+		state, err := git.Refresh(m.projectPath)
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
@@ -2754,10 +2678,10 @@ func (m *model) unstageAllCmd() tea.Cmd {
 		return m.refreshGitCmd()
 	}
 	return func() tea.Msg {
-		if err := bentodiffs.UnstageAll(m.projectPath); err != nil {
+		if err := git.UnstageAll(m.projectPath); err != nil {
 			return gitRefreshMsg{Err: err}
 		}
-		state, err := bentodiffs.Refresh(m.projectPath)
+		state, err := git.Refresh(m.projectPath)
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
@@ -2768,11 +2692,11 @@ func (m *model) unstageAllCmd() tea.Cmd {
 func (m *model) loadDiffHistoryCmd() tea.Cmd {
 	if useMockViews {
 		return func() tea.Msg {
-			return diffHistoryMsg{Commits: []bentodiffs.CommitInfo{{Hash: "HEAD", Message: "mock commit"}}}
+			return diffHistoryMsg{Commits: []git.CommitInfo{{Hash: "HEAD", Message: "mock commit"}}}
 		}
 	}
 	return func() tea.Msg {
-		commits, err := bentodiffs.CommitLog(m.projectPath, 100)
+		commits, err := git.CommitLog(m.projectPath, 100)
 		return diffHistoryMsg{Commits: commits, Err: err}
 	}
 }
@@ -2784,7 +2708,7 @@ func (m *model) loadBranchesCmd() tea.Cmd {
 		}
 	}
 	return func() tea.Msg {
-		branches, current, err := bentodiffs.BranchList(m.projectPath)
+		branches, current, err := git.BranchList(m.projectPath)
 		return gitBranchesMsg{Branches: branches, Current: current, Err: err}
 	}
 }
@@ -2795,10 +2719,10 @@ func (m *model) createBranchCmd(name string) tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		if err := bentodiffs.BranchCreate(m.projectPath, name); err != nil {
+		if err := git.BranchCreate(m.projectPath, name); err != nil {
 			return gitRefreshMsg{Err: err}
 		}
-		state, err := bentodiffs.Refresh(m.projectPath)
+		state, err := git.Refresh(m.projectPath)
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
@@ -2813,10 +2737,10 @@ func (m *model) switchBranchCmd(name string) tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		if err := bentodiffs.BranchSwitch(m.projectPath, name); err != nil {
+		if err := git.BranchSwitch(m.projectPath, name); err != nil {
 			return gitRefreshMsg{Err: err}
 		}
-		state, err := bentodiffs.Refresh(m.projectPath)
+		state, err := git.Refresh(m.projectPath)
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
@@ -2829,10 +2753,10 @@ func (m *model) deleteBranchCmd(name string) tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		if err := bentodiffs.BranchDelete(m.projectPath, name); err != nil {
+		if err := git.BranchDelete(m.projectPath, name); err != nil {
 			return gitRefreshMsg{Err: err}
 		}
-		state, err := bentodiffs.Refresh(m.projectPath)
+		state, err := git.Refresh(m.projectPath)
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
@@ -2847,7 +2771,7 @@ func (m *model) loadStashCmd() tea.Cmd {
 		}
 	}
 	return func() tea.Msg {
-		items, err := bentodiffs.StashList(m.projectPath, 40)
+		items, err := git.StashList(m.projectPath, 40)
 		return gitStashMsg{Items: items, Err: err}
 	}
 }
@@ -2857,10 +2781,10 @@ func (m *model) stashPushCmd() tea.Cmd {
 		return m.refreshGitCmd()
 	}
 	return func() tea.Msg {
-		if err := bentodiffs.StashPush(m.projectPath, ""); err != nil {
+		if err := git.StashPush(m.projectPath, ""); err != nil {
 			return gitRefreshMsg{Err: err}
 		}
-		state, err := bentodiffs.Refresh(m.projectPath)
+		state, err := git.Refresh(m.projectPath)
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
@@ -2873,10 +2797,10 @@ func (m *model) stashPopCmd() tea.Cmd {
 		return m.refreshGitCmd()
 	}
 	return func() tea.Msg {
-		if err := bentodiffs.StashPop(m.projectPath); err != nil {
+		if err := git.StashPop(m.projectPath); err != nil {
 			return gitRefreshMsg{Err: err}
 		}
-		state, err := bentodiffs.Refresh(m.projectPath)
+		state, err := git.Refresh(m.projectPath)
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
@@ -2887,18 +2811,18 @@ func (m *model) stashPopCmd() tea.Cmd {
 func (m *model) loadGitLogCmd() tea.Cmd {
 	if useMockViews {
 		return func() tea.Msg {
-			return gitLogMsg{Commits: []bentodiffs.CommitInfo{{Hash: "HEAD", Message: "mock log"}}}
+			return gitLogMsg{Commits: []git.CommitInfo{{Hash: "HEAD", Message: "mock log"}}}
 		}
 	}
 	return func() tea.Msg {
-		commits, err := bentodiffs.CommitLog(m.projectPath, 30)
+		commits, err := git.CommitLog(m.projectPath, 30)
 		return gitLogMsg{Commits: commits, Err: err}
 	}
 }
 
 func (m *model) cloneRepoCmd(url, dest string) tea.Cmd {
 	return func() tea.Msg {
-		projectPath, err := bentodiffs.Clone(url, dest)
+		projectPath, err := git.Clone(url, dest)
 		if err != nil {
 			return cloneDoneMsg{Err: err}
 		}
@@ -2918,7 +2842,7 @@ func (m *model) initProjectCmd(dest string) tea.Cmd {
 		if err := os.MkdirAll(abs, 0o755); err != nil {
 			return cloneDoneMsg{Err: err}
 		}
-		if _, _, err := bentodiffs.RunGit(abs, "init"); err != nil {
+		if _, _, err := git.RunGit(abs, "init"); err != nil {
 			return cloneDoneMsg{Err: err}
 		}
 		return cloneDoneMsg{ProjectPath: abs}
@@ -2964,7 +2888,7 @@ func (m *model) sendDiffContextToPiCmd() tea.Cmd {
 	}
 	selected := strings.TrimSpace(m.diff.SelectedPath)
 	return func() tea.Msg {
-		d, err := bentodiffs.DiffForFile(m.projectPath, selected)
+		d, err := diffs.DiffForFile(m.projectPath, selected)
 		if err != nil {
 			return piContextMsg{Err: err}
 		}
@@ -2985,7 +2909,7 @@ func (m *model) sendStagedDiffToPiCmd() tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		d, _, err := bentodiffs.RunGit(m.projectPath, "diff", "--cached")
+		d, _, err := git.RunGit(m.projectPath, "diff", "--cached")
 		if err != nil {
 			return piContextMsg{Err: err}
 		}
@@ -3138,7 +3062,7 @@ func (m *model) updatePIKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.diffView = diffViewHistory
 		if useMockViews {
 			m.ensureDiffViewer()
-			m.diffViewer.SetDiffs(bentodiffs.MockDiffs())
+			m.diffViewer.SetDiffs(diffs.MockDiffs())
 			return m, nil
 		}
 		return m, m.loadDiffHistoryCmd()
@@ -3293,7 +3217,7 @@ func (m *model) handlePaletteAction(msg commandpallette.ActionMsg) (tea.Model, t
 		m.mode = modeGit
 		m.gitView = gitViewStatus
 		if useMockViews {
-			m.git = bentodiffs.MockGitState()
+			m.git = git.MockGitState()
 			return m, nil
 		}
 		return m, m.refreshGitCmd()
@@ -3302,7 +3226,7 @@ func (m *model) handlePaletteAction(msg commandpallette.ActionMsg) (tea.Model, t
 		m.diffView = diffViewHistory
 		m.ensureDiffViewer()
 		if useMockViews {
-			m.diffViewer.SetDiffs(bentodiffs.MockDiffs())
+			m.diffViewer.SetDiffs(diffs.MockDiffs())
 			return m, nil
 		}
 		return m, m.loadDiffHistoryCmd()
@@ -3741,7 +3665,7 @@ func (m *model) normalizeRepoPath(path string) string {
 	if err == nil {
 		path = abs
 	}
-	root, _, gitErr := bentodiffs.RunGit(path, "rev-parse", "--show-toplevel")
+	root, _, gitErr := git.RunGit(path, "rev-parse", "--show-toplevel")
 	if gitErr == nil {
 		root = strings.TrimSpace(root)
 		if root != "" {
@@ -3767,7 +3691,7 @@ func (m *model) findRepoRoot(path string) string {
 		path = filepath.Dir(path)
 	}
 	for {
-		if bentodiffs.IsGitRepo(path) {
+		if git.IsGitRepo(path) {
 			return m.normalizeRepoPath(path)
 		}
 		parent := filepath.Dir(path)

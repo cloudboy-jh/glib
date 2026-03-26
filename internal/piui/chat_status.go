@@ -9,11 +9,7 @@ type FooterState struct {
 }
 
 func (s *Session) FooterState(icon, repo string) FooterState {
-	spinner := s.SpinnerFrame()
 	prefix := icon
-	if spinner != "" {
-		prefix += " " + spinner
-	}
 	if strings.TrimSpace(repo) != "" {
 		prefix += " " + repo
 	}
