@@ -54,6 +54,7 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
   - `GLIB_GITHUB_CLIENT_ID` env override
   - built-in release default client id
 - Token persistence uses user config dir: `<user-config-dir>/glib/github_token`.
+- User settings persist in `<user-config-dir>/glib/config.json`.
 - Auth states: `SIGNED_OUT`, `PENDING`, `AUTHORIZED`, `EXPIRED`.
 
 ## Projects Contract (`p`)
@@ -115,6 +116,7 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 - Renders streaming assistant text and tool blocks in glib body region.
 - Input-first keymap: typing goes to input; `ctrl+g` prefixes command shortcuts while focused.
 - Prefix shortcuts include mode jumps (`p`/`d`/`g`/`i`), session/model (`n`/`m`), and viewport follow/scroll (`G`/`j`/`k`).
+- Stored quick settings (theme/model) are loaded from config and applied on startup/PI launch.
 - `ctrl+o` toggles inline tool output expansion, `ctrl+t` toggles thinking visibility.
 - `ctrl+d` jumps to DIFF, `ctrl+g` jumps to GIT (both preserve session).
 - `esc` soft-pauses: returns to `PROJECTS`, session stays alive in background.
@@ -127,7 +129,7 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 - `/` activates slash command picker with autocomplete.
 - Recognized commands don't appear as user chat turns.
 - Available commands:
-  - `/models`, `/new`, `/sessions`, `/compact`, `/fork`
+  - `/models` (interactive picker), `/new`, `/sessions`, `/compact`, `/fork`
   - `/state`, `/stats`, `/commands`
   - `/thinking`, `/tools`, `/rename`, `/export`, `/undo`
   - `/theme` — opens theme picker
@@ -147,6 +149,7 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 - Global shortcut opens mode-gated command palette.
 - Available actions depend on current mode.
 - Actions include: mode switches, PI commands, git operations, theme picker.
+- Palette rows render action and keybind on one line.
 - Unimplemented actions fail gracefully without breaking UI.
 
 ## Architecture Boundaries
@@ -163,6 +166,7 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 ## UI and Layout Contracts
 
 - Theme source of truth: `theme.CurrentTheme()`.
+- Theme changes persist immediately to user config and are restored on startup.
 - Shell composition: Bento `rooms.Focus(...)` + anchored footer.
 - Keybind hints in footer must match real key handling.
 - No duplicate footers/key legends inside content panes.

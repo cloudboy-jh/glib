@@ -78,16 +78,18 @@ const (
 type promptMode string
 
 const (
-	promptNone      promptMode = ""
-	promptCloneDest promptMode = "clone_dest"
-	promptCommit    promptMode = "commit"
-	promptDiscard   promptMode = "discard"
-	promptError     promptMode = "error"
-	promptTheme     promptMode = "theme"
-	promptNewProj   promptMode = "new_project"
-	promptDiffRev   promptMode = "diff_revision"
-	promptBranchNew promptMode = "branch_new"
-	promptPIPause   promptMode = "pi_pause_confirm"
+	promptNone       promptMode = ""
+	promptCloneDest  promptMode = "clone_dest"
+	promptCommit     promptMode = "commit"
+	promptDiscard    promptMode = "discard"
+	promptError      promptMode = "error"
+	promptTheme      promptMode = "theme"
+	promptNewProj    promptMode = "new_project"
+	promptDiffRev    promptMode = "diff_revision"
+	promptBranchNew  promptMode = "branch_new"
+	promptPIPause    promptMode = "pi_pause_confirm"
+	promptModelPick  promptMode = "model_pick"
+	promptCommitView promptMode = "commit_view"
 )
 
 type gitRefreshMsg struct {
@@ -175,6 +177,13 @@ type localTreeRow struct {
 	Label string
 }
 
+type modelPickerItem struct {
+	ID       string
+	Provider string
+	Name     string
+	Current  bool
+}
+
 type iconSet struct {
 	Projects string
 	Clone    string
@@ -195,6 +204,7 @@ type model struct {
 	localPicker      *selectx.Model
 	themePicker      *selectx.Model
 	commitPicker     *selectx.Model
+	modelPicker      *selectx.Model
 	width            int
 	height           int
 	inputW           int
@@ -210,6 +220,7 @@ type model struct {
 	prompt           promptMode
 	promptTitle      string
 	promptHint       string
+	promptBody       string
 	pendingURL       string
 	pendingPath      string
 	git              git.GitState
@@ -254,6 +265,8 @@ type model struct {
 	gitStashCursor   int
 	gitLog           []git.CommitInfo
 	gitLogCursor     int
+	settings         settingsModel
+	modelItems       []modelPickerItem
 }
 
 func NewModel() *model {
@@ -273,7 +286,18 @@ func NewModel() *model {
 	cp.SetPlaceholder("No commits")
 	cp.Focus()
 	cp.Open()
+	mp := selectx.New()
+	mp.SetPlaceholder("No models")
+	mp.Focus()
+	mp.Open()
 	piSession := piui.NewSession()
+
+	settings, settingsErr := loadSettingsModel()
+	if settingsErr == nil {
+		if savedTheme := settings.Theme(); savedTheme != "" {
+			_, _ = theme.SetTheme(savedTheme)
+		}
+	}
 
 	cwd, _ := os.Getwd()
 	m := &model{
@@ -285,6 +309,7 @@ func NewModel() *model {
 		localPicker:   lp,
 		themePicker:   tp,
 		commitPicker:  cp,
+		modelPicker:   mp,
 		mode:          modeProjects,
 		picker:        pickerLocal,
 		localDir:      cwd,
@@ -298,6 +323,10 @@ func NewModel() *model {
 		repoPage:      1,
 		workspaceKind: workspace.KindLocal,
 		pendingSlash:  map[string]string{},
+		settings:      settings,
+	}
+	if settingsErr != nil {
+		m.statusMessage = "settings unavailable: " + settingsErr.Error()
 	}
 	m.dialogs.SetTheme(theme.CurrentTheme())
 	ws, err := workspace.NewManager(workspace.KindLocal)
@@ -582,6 +611,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sendPiCmd(pi.CmdGetState()),
 			m.sendPiCmd(map[string]any{"type": "get_commands"}),
 			m.sendPiCmd(map[string]any{"type": "get_session_stats"}),
+		}
+		if modelID := strings.TrimSpace(m.settings.Model()); modelID != "" {
+			provider := strings.TrimSpace(m.settings.ModelProvider())
+			if provider == "" {
+				provider = "openai-codex"
+			}
+			base = append(base, m.sendPiCmd(pi.CmdSetModel(provider, modelID)))
 		}
 		if strings.TrimSpace(m.piPendingContext) != "" {
 			ctx := m.piPendingContext
@@ -984,6 +1020,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							return m, m.refreshDiffCmd("commit", sha, "")
 						}
 					}
+				case "l":
+					if len(m.diffHistory) > 0 {
+						c := m.diffHistory[m.diffHistoryCur]
+						body := strings.TrimSpace(c.Message)
+						if body == "" {
+							body = "(no commit title)"
+						}
+						hash := strings.TrimSpace(c.Hash)
+						if hash != "" {
+							body = hash + "\n\n" + body
+						}
+						m.openCommitViewPrompt("Commit", "enter/esc close", body)
+						return m, nil
+					}
 				case "esc", "q":
 					m.mode = modeProjects
 				}
@@ -1382,18 +1432,30 @@ var repoLoadingMessages = []string{
 
 func (m *model) drawRepoProjectsView(surf *surface.Surface, bodyH int, t theme.Theme, dim, bright lipgloss.Style) {
 	contentW := m.projectsContentWidth()
-	lines := make([]string, 0, 5)
+	listH := 5
+	rowW := max(8, contentW)
+	base := lipgloss.NewStyle().Background(t.BackgroundPanel()).Foreground(t.Text())
+	active := base.Copy().Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Bold(true)
+	synthStyle := base.Copy().Foreground(t.TextAccent())
+	padRow := func(v string) string {
+		v = fitLine(v, rowW)
+		if lipgloss.Width(v) < rowW {
+			v += strings.Repeat(" ", rowW-lipgloss.Width(v))
+		}
+		return v
+	}
+	lines := make([]string, 0, listH)
 	if m.reposLoading {
 		idx := (int(time.Now().UnixMilli()/600) % len(repoLoadingMessages))
 		msg := repoLoadingMessages[idx]
-		lines = append(lines, lipgloss.NewStyle().Foreground(t.TextMuted()).Render(msg))
-		for len(lines) < 5 {
-			lines = append(lines, "")
+		lines = append(lines, base.Copy().Foreground(t.TextMuted()).Render(padRow(msg)))
+		for len(lines) < listH {
+			lines = append(lines, base.Render(padRow("")))
 		}
 	} else if len(m.repos) == 0 {
-		lines = append(lines, lipgloss.NewStyle().Foreground(t.TextMuted()).Render("No repositories found. Press r to refresh."))
-		for len(lines) < 5 {
-			lines = append(lines, "")
+		lines = append(lines, base.Copy().Foreground(t.TextMuted()).Render(padRow("No repositories found. Press r to refresh.")))
+		for len(lines) < listH {
+			lines = append(lines, base.Render(padRow("")))
 		}
 	} else {
 		// Build display list: synthetic "last" entry at index -1 followed by real repos
@@ -1415,13 +1477,8 @@ func (m *model) drawRepoProjectsView(surf *surface.Surface, bodyH int, t theme.T
 		}
 
 		total := len(displayRows)
-		listH := 5
 		start := windowStart(m.repoCursor, listH, total)
 		end := min(total, start+listH)
-		base := lipgloss.NewStyle().Width(contentW).Background(t.BackgroundPanel()).Foreground(t.Text())
-		active := base.Copy().Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Bold(true)
-		synthStyle := base.Copy().Foreground(t.TextAccent())
-		activeSynth := active.Copy()
 		for i := start; i < end; i++ {
 			row := displayRows[i]
 			prefix := "  "
@@ -1432,11 +1489,7 @@ func (m *model) drawRepoProjectsView(surf *surface.Surface, bodyH int, t theme.T
 			}
 			if i == m.repoCursor {
 				prefix = "> "
-				if row.isSynth {
-					style = activeSynth
-				} else {
-					style = active
-				}
+				style = active
 			}
 			if i == start && start > 0 {
 				marker = "^ "
@@ -1449,10 +1502,10 @@ func (m *model) drawRepoProjectsView(surf *surface.Surface, bodyH int, t theme.T
 			} else if m.repos[row.repoIdx].Private {
 				name += " (private)"
 			}
-			lines = append(lines, style.Render(fitLine(marker+prefix+name, contentW)))
+			lines = append(lines, style.Render(padRow(marker+prefix+name)))
 		}
 		for len(lines) < listH {
-			lines = append(lines, base.Render(""))
+			lines = append(lines, base.Render(padRow("")))
 		}
 	}
 
@@ -1749,7 +1802,7 @@ func (m *model) syncFooter() {
 		}
 	case modeDiff:
 		if m.diffView == diffViewHistory {
-			cfg.Context = m.icons.Diff + " commit history  enter open  esc back"
+			cfg.Context = m.icons.Diff + " commit history  enter open  l preview  esc back"
 			cfg.Position = fmt.Sprintf("%d/%d", min(len(m.diffHistory), m.diffHistoryCur+1), max(1, len(m.diffHistory)))
 		} else {
 			cfg.Context = m.icons.Diff + " j/k scroll  n/N file  c commit history  i send to pi"
@@ -1828,12 +1881,58 @@ func (m *model) updatePrompt(msg tea.KeyMsg) tea.Cmd {
 				m.showError(err.Error())
 				return cmd
 			}
+			if err := m.settings.SetTheme(sel.Value); err != nil {
+				m.showError("failed to save theme: " + err.Error())
+				return cmd
+			}
 			m.statusMessage = "theme: " + sel.Label
 			m.closePrompt()
 			return cmd
 		}
 
 		return cmd
+	}
+
+	if m.prompt == promptModelPick {
+		u, cmd := m.modelPicker.Update(msg)
+		m.modelPicker = u.(*selectx.Model)
+
+		switch msg.String() {
+		case "esc":
+			m.closePrompt()
+			return cmd
+		case "enter":
+			sel, ok := m.modelPicker.Selected()
+			if !ok {
+				return cmd
+			}
+			modelID := strings.TrimSpace(sel.Value)
+			if modelID == "" {
+				return cmd
+			}
+			provider := strings.TrimSpace(m.modelProviderByID(modelID))
+			if provider == "" {
+				provider = "openai-codex"
+			}
+			if err := m.settings.SetModel(provider, modelID); err != nil {
+				m.showError("failed to save model: " + err.Error())
+				return cmd
+			}
+			m.statusMessage = "model: " + modelID
+			m.closePrompt()
+			return tea.Batch(cmd, m.trackedPiCmd("/models:set", pi.CmdSetModel(provider, modelID)))
+		}
+
+		return cmd
+	}
+
+	if m.prompt == promptCommitView {
+		switch msg.String() {
+		case "esc", "enter":
+			m.closePrompt()
+			return nil
+		}
+		return nil
 	}
 
 	switch msg.String() {
@@ -1911,13 +2010,23 @@ func (m *model) openPrompt(kind promptMode, title, hint, initial string) {
 	m.prompt = kind
 	m.promptTitle = title
 	m.promptHint = hint
+	m.promptBody = ""
 	m.promptInput.SetValue(initial)
+}
+
+func (m *model) openCommitViewPrompt(title, hint, body string) {
+	m.prompt = promptCommitView
+	m.promptTitle = title
+	m.promptHint = hint
+	m.promptBody = strings.TrimSpace(body)
+	m.promptInput.SetValue("")
 }
 
 func (m *model) closePrompt() {
 	m.prompt = promptNone
 	m.promptTitle = ""
 	m.promptHint = ""
+	m.promptBody = ""
 	m.pendingURL = ""
 	m.pendingPath = ""
 	m.promptInput.SetValue("")
@@ -1932,8 +2041,6 @@ func (m *model) showError(errText string) {
 }
 
 func (m *model) renderPrompt(t theme.Theme) string {
-	title := lipgloss.NewStyle().Foreground(t.TextAccent()).Bold(true).Render(m.promptTitle)
-	hint := lipgloss.NewStyle().Foreground(t.TextMuted()).Render(m.promptHint)
 	availW := max(16, m.width-4)
 	boxW := m.width / 2
 	if boxW < 40 {
@@ -1942,12 +2049,40 @@ func (m *model) renderPrompt(t theme.Theme) string {
 	if boxW > availW {
 		boxW = availW
 	}
+
+	// Commit view gets wider, more focused sizing.
+	if m.prompt == promptCommitView {
+		boxW = clamp(m.width*2/3, 48, min(availW, 90))
+	}
+
 	bodyW := max(10, boxW-6)
+
+	// Every row must be rendered at full bodyW with an explicit panel background.
+	// Without this, text-only glyphs leave transparent cells that let whatever
+	// is drawn behind the modal (e.g. the diff card) bleed through.
+	rowStyle := lipgloss.NewStyle().Background(t.BackgroundPanel()).Width(bodyW)
+	title := rowStyle.Copy().Foreground(t.TextAccent()).Bold(true).Render(fitLine(m.promptTitle, bodyW))
+	hint := rowStyle.Copy().Foreground(t.TextMuted()).Render(fitLine(m.promptHint, bodyW))
+	blank := rowStyle.Render("")
+
 	body := ""
 	if m.prompt == promptError {
-		body = lipgloss.NewStyle().Foreground(t.Error()).Render(fitMultiline(m.errorText, bodyW, 4))
+		body = rowStyle.Copy().Foreground(t.Error()).Render(fitMultiline(m.errorText, bodyW, 4))
+	} else if m.prompt == promptCommitView {
+		maxLines := clamp(m.bodyHeight()-10, 6, 30)
+		lines := wrapPlainText(m.promptBody, bodyW)
+		if len(lines) > maxLines {
+			lines = lines[:maxLines]
+		}
+		rendered := make([]string, len(lines))
+		for i, l := range lines {
+			rendered[i] = rowStyle.Copy().Foreground(t.Text()).Render(fitLine(l, bodyW))
+		}
+		body = strings.Join(rendered, "\n")
 	} else if m.prompt == promptTheme {
 		body = viewString(m.themePicker.View())
+	} else if m.prompt == promptModelPick {
+		body = viewString(m.modelPicker.View())
 	} else {
 		body = viewString(m.promptInput.View())
 	}
@@ -1957,7 +2092,7 @@ func (m *model) renderPrompt(t theme.Theme) string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(t.BorderFocus()).
 		Padding(1, 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left, title, hint, "", body))
+		Render(lipgloss.JoinVertical(lipgloss.Left, title, hint, blank, body))
 	return box
 }
 
@@ -3016,7 +3151,7 @@ func (m *model) updatePIKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "n":
 			return m, m.sendPiCmd(pi.CmdNewSession())
 		case "m":
-			return m, m.sendPiCmd(pi.CmdCycleModel())
+			return m, m.trackedPiCmd("/models", map[string]any{"type": "get_available_models"})
 		case "G":
 			m.piui.GotoBottom()
 			return m, nil
@@ -3243,6 +3378,10 @@ func (m *model) handlePaletteAction(msg commandpallette.ActionMsg) (tea.Model, t
 		m.reloadThemeItems()
 		m.openPrompt(promptTheme, "Theme", "j/k move, enter apply, esc cancel", "")
 		return m, nil
+	case "settings.open":
+		m.reloadThemeItems()
+		m.openPrompt(promptTheme, "Settings", "Theme: j/k move, enter apply, esc cancel", "")
+		return m, nil
 	case "projects.backend":
 		if m.workspaceKind == workspace.KindLocal {
 			m.workspaceKind = workspace.KindEphemeral
@@ -3275,7 +3414,7 @@ func (m *model) handlePaletteAction(msg commandpallette.ActionMsg) (tea.Model, t
 	case "pi.new":
 		return m, m.sendPiCmd(pi.CmdNewSession())
 	case "pi.model":
-		return m, m.sendPiCmd(pi.CmdCycleModel())
+		return m, m.trackedPiCmd("/models", map[string]any{"type": "get_available_models"})
 	case "pi.compact":
 		return m, m.sendPiCmd(map[string]any{"type": "compact"})
 	case "pi.tools":
@@ -3315,32 +3454,26 @@ func (m *model) handleSlashCommand(input string) (bool, tea.Cmd) {
 	if _, ok := slash.Find(name); !ok {
 		return false, nil
 	}
-	makeTracked := func(cmdName string, payload map[string]any) tea.Cmd {
-		id := m.nextSlashID()
-		payload["id"] = id
-		m.pendingSlash[id] = cmdName
-		return m.sendPiCmd(payload)
-	}
 
 	switch name {
 	case "/models":
-		return true, makeTracked(name, map[string]any{"type": "get_available_models"})
+		return true, m.trackedPiCmd(name, map[string]any{"type": "get_available_models"})
 	case "/new":
-		return true, makeTracked(name, map[string]any{"type": "new_session"})
+		return true, m.trackedPiCmd(name, map[string]any{"type": "new_session"})
 	case "/sessions":
 		m.piui.Messages = append(m.piui.Messages, piui.Message{Role: piui.RoleAssistant, Text: "Session browser is not exposed in the current PI RPC surface yet."})
 		m.refreshAgentViewport()
 		return true, nil
 	case "/compact":
-		return true, makeTracked(name, map[string]any{"type": "compact"})
+		return true, m.trackedPiCmd(name, map[string]any{"type": "compact"})
 	case "/fork":
-		return true, makeTracked(name, map[string]any{"type": "fork"})
+		return true, m.trackedPiCmd(name, map[string]any{"type": "fork"})
 	case "/state":
-		return true, makeTracked(name, pi.CmdGetState())
+		return true, m.trackedPiCmd(name, pi.CmdGetState())
 	case "/stats":
-		return true, makeTracked(name, map[string]any{"type": "get_session_stats"})
+		return true, m.trackedPiCmd(name, map[string]any{"type": "get_session_stats"})
 	case "/commands":
-		return true, makeTracked(name, map[string]any{"type": "get_commands"})
+		return true, m.trackedPiCmd(name, map[string]any{"type": "get_commands"})
 	case "/thinking":
 		m.piui.ToggleThinking()
 		m.refreshAgentViewport()
@@ -3350,11 +3483,11 @@ func (m *model) handleSlashCommand(input string) (bool, tea.Cmd) {
 		m.refreshAgentViewport()
 		return true, nil
 	case "/rename":
-		return true, makeTracked(name, map[string]any{"type": "set_session_name"})
+		return true, m.trackedPiCmd(name, map[string]any{"type": "set_session_name"})
 	case "/export":
-		return true, makeTracked(name, map[string]any{"type": "export_html"})
+		return true, m.trackedPiCmd(name, map[string]any{"type": "export_html"})
 	case "/undo":
-		return true, makeTracked(name, map[string]any{"type": "fork"})
+		return true, m.trackedPiCmd(name, map[string]any{"type": "fork"})
 	case "/theme":
 		m.reloadThemeItems()
 		m.openPrompt(promptTheme, "Theme", "j/k move, enter apply, esc cancel", "")
@@ -3383,6 +3516,13 @@ func (m *model) nextSlashID() string {
 	return fmt.Sprintf("slash-%d", m.slashSeq)
 }
 
+func (m *model) trackedPiCmd(tag string, payload map[string]any) tea.Cmd {
+	id := m.nextSlashID()
+	payload["id"] = id
+	m.pendingSlash[id] = tag
+	return m.sendPiCmd(payload)
+}
+
 func (m *model) appendSlashResponse(cmd string, msg pi.PiResponseMsg) {
 	if !msg.Success {
 		errText := strings.TrimSpace(msg.Error)
@@ -3395,7 +3535,12 @@ func (m *model) appendSlashResponse(cmd string, msg pi.PiResponseMsg) {
 	var text string
 	switch cmd {
 	case "/models":
+		if m.openModelPicker(msg.Data) {
+			return
+		}
 		text = formatModelsText(msg.Data)
+	case "/models:set":
+		text = formatModelSetText(msg.Data)
 	case "/state":
 		text = formatStateText(msg.Data)
 	case "/stats":
@@ -3409,6 +3554,111 @@ func (m *model) appendSlashResponse(cmd string, msg pi.PiResponseMsg) {
 		text = "ok"
 	}
 	m.piui.Messages = append(m.piui.Messages, piui.Message{Role: piui.RoleAssistant, Text: text})
+}
+
+func (m *model) openModelPicker(data map[string]any) bool {
+	items := parseModelPickerItems(data)
+	if len(items) == 0 {
+		return false
+	}
+	m.modelItems = items
+	selectItems := make([]selectx.Item, 0, len(items))
+	for _, it := range items {
+		label := strings.TrimSpace(it.Name)
+		if label == "" {
+			label = it.ID
+		}
+		if it.Provider != "" {
+			label += " (" + it.Provider + ")"
+		}
+		if it.Current {
+			label = "* " + label
+		}
+		selectItems = append(selectItems, selectx.Item{Label: label, Value: it.ID})
+	}
+	m.modelPicker.SetItems(selectItems)
+	m.modelPicker.SetSize(max(36, m.width/2), max(10, min(20, m.bodyHeight()-8)))
+	m.modelPicker.Focus()
+	m.modelPicker.Open()
+	m.openPrompt(promptModelPick, "Model", "j/k move, enter set, esc cancel", "")
+	return true
+}
+
+func parseModelPickerItems(data map[string]any) []modelPickerItem {
+	if data == nil {
+		return nil
+	}
+	raw, _ := data["models"].([]any)
+	if len(raw) == 0 {
+		return nil
+	}
+	currentID := ""
+	if v, ok := data["currentModelId"].(string); ok {
+		currentID = strings.TrimSpace(v)
+	}
+	if currentID == "" {
+		if current, ok := data["current"].(map[string]any); ok {
+			if id, ok := current["id"].(string); ok {
+				currentID = strings.TrimSpace(id)
+			}
+		}
+	}
+	out := make([]modelPickerItem, 0, len(raw))
+	for _, item := range raw {
+		v, _ := item.(map[string]any)
+		id, _ := v["id"].(string)
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		provider, _ := v["provider"].(string)
+		name, _ := v["name"].(string)
+		current, _ := v["current"].(bool)
+		out = append(out, modelPickerItem{
+			ID:       id,
+			Provider: strings.TrimSpace(provider),
+			Name:     strings.TrimSpace(name),
+			Current:  current || (currentID != "" && id == currentID),
+		})
+	}
+	return out
+}
+
+func (m *model) modelProviderByID(modelID string) string {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return ""
+	}
+	for _, it := range m.modelItems {
+		if strings.TrimSpace(it.ID) == modelID {
+			return strings.TrimSpace(it.Provider)
+		}
+	}
+	return ""
+}
+
+func formatModelSetText(data map[string]any) string {
+	if data == nil {
+		return "Model updated."
+	}
+	if name, ok := data["name"].(string); ok && strings.TrimSpace(name) != "" {
+		return "Model set to " + strings.TrimSpace(name) + "."
+	}
+	if id, ok := data["id"].(string); ok && strings.TrimSpace(id) != "" {
+		return "Model set to " + strings.TrimSpace(id) + "."
+	}
+	if model, ok := data["model"].(map[string]any); ok {
+		if name, ok := model["name"].(string); ok && strings.TrimSpace(name) != "" {
+			return "Model set to " + strings.TrimSpace(name) + "."
+		}
+		if id, ok := model["id"].(string); ok && strings.TrimSpace(id) != "" {
+			return "Model set to " + strings.TrimSpace(id) + "."
+		}
+	}
+	if id, ok := data["modelId"].(string); ok && strings.TrimSpace(id) != "" {
+		return "Model set to " + strings.TrimSpace(id) + "."
+	}
+	return "Model updated."
 }
 
 func formatModelsText(data map[string]any) string {

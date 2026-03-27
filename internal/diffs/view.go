@@ -31,17 +31,27 @@ func RenderHistory(commits []git.CommitInfo, cursor, contentW, bodyW, bodyH int,
 	listH := 5
 	total := len(commits)
 	cur := clamp(cursor, 0, max(0, total-1))
+	// The block has Padding(0,1) + border (1px each side) = 4 chars of frame.
+	// rowW must match the actual inner drawable width so rows don't wrap.
 	rowW := max(8, contentW-4)
-
+	base := lipgloss.NewStyle().Background(t.BackgroundPanel()).Foreground(t.Text())
+	active := base.Copy().Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Bold(true)
+	muted := base.Copy().Foreground(t.TextMuted())
+	hashW := 7
+	gap := "  "
+	padRow := func(v string) string {
+		v = clipLine(v, rowW)
+		if lipgloss.Width(v) < rowW {
+			v += strings.Repeat(" ", rowW-lipgloss.Width(v))
+		}
+		return v
+	}
 	lines := make([]string, 0, listH)
 	if total == 0 {
-		lines = append(lines, lipgloss.NewStyle().Foreground(t.TextMuted()).Render("No commits found"))
+		lines = append(lines, muted.Render(padRow("No commits found")))
 	} else {
 		start := windowStart(cur, listH, total)
 		end := min(total, start+listH)
-		base := lipgloss.NewStyle().Width(rowW).Background(t.BackgroundPanel()).Foreground(t.Text())
-		active := base.Copy().Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Bold(true)
-		const fixedCols = 13
 		for i := start; i < end; i++ {
 			c := commits[i]
 			prefix := "  "
@@ -56,25 +66,32 @@ func RenderHistory(commits []git.CommitInfo, cursor, contentW, bodyW, bodyH int,
 			} else if i == end-1 && end < total {
 				marker = "v "
 			}
-			msgW := max(1, rowW-fixedCols)
-			msg := clipLine(c.Message, msgW)
-			var rowStr string
-			if i == cur {
-				rowStr = styles.ClipANSI(marker+prefix+c.Hash+"  "+msg, rowW)
-			} else {
-				coloredHash := lipgloss.NewStyle().Foreground(t.Info()).Render(c.Hash)
-				rowStr = styles.ClipANSI(marker+prefix+coloredHash+"  "+msg, rowW)
+			hash := strings.TrimSpace(c.Hash)
+			if len(hash) > 7 {
+				hash = hash[:7]
 			}
-			lines = append(lines, style.Render(rowStr))
+			if hash == "" {
+				hash = "-------"
+			}
+			if lipgloss.Width(hash) < hashW {
+				hash += strings.Repeat(" ", hashW-lipgloss.Width(hash))
+			}
+			lead := marker + prefix + hash + gap
+			msgW := max(1, rowW-lipgloss.Width(lead))
+			row := lead + clipCommitTitle(c.Message, msgW)
+			lines = append(lines, style.Render(padRow(row)))
 		}
 	}
 	for len(lines) < listH {
-		blank := lipgloss.NewStyle().Width(contentW).Background(t.BackgroundPanel())
-		lines = append(lines, blank.Render(""))
+		lines = append(lines, base.Render(padRow("")))
 	}
 
-	header := lipgloss.NewStyle().Foreground(t.TextAccent()).Bold(true).Render(icon + "  Commit History")
-	meta := lipgloss.NewStyle().Foreground(t.TextMuted()).Render(fmt.Sprintf("%d commits", total))
+	// Render header and meta at the same inner width so all lines are uniformly
+	// pre-painted and the block background doesn't create a second-layer artifact.
+	headerStyle := lipgloss.NewStyle().Background(t.BackgroundPanel()).Foreground(t.TextAccent()).Bold(true)
+	metaStyle := lipgloss.NewStyle().Background(t.BackgroundPanel()).Foreground(t.TextMuted())
+	header := headerStyle.Render(padRow(icon + "  Commit History"))
+	meta := metaStyle.Render(padRow(fmt.Sprintf("%d commits", total)))
 	content := lipgloss.JoinVertical(lipgloss.Left, header, meta, "", strings.Join(lines, "\n"))
 	block := lipgloss.NewStyle().
 		Background(t.BackgroundPanel()).
@@ -124,6 +141,29 @@ func clipLine(v string, width int) string {
 		return ""
 	}
 	return styles.ClipANSI(v, width)
+}
+
+func singleLine(v string) string {
+	v = strings.ReplaceAll(v, "\r", "")
+	if i := strings.IndexByte(v, '\n'); i >= 0 {
+		v = v[:i]
+	}
+	v = strings.Join(strings.Fields(v), " ")
+	return strings.TrimSpace(v)
+}
+
+func clipCommitTitle(v string, width int) string {
+	v = singleLine(v)
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(v) <= width {
+		return v
+	}
+	if width <= 2 {
+		return styles.ClipANSI(v, width)
+	}
+	return styles.ClipANSI(v, width-2) + ".."
 }
 
 func clamp(v, lo, hi int) int {

@@ -8,7 +8,7 @@ type Command struct {
 }
 
 var builtin = []Command{
-	{Name: "/models", Description: "List and switch models"},
+	{Name: "/models", Description: "Open interactive model picker"},
 	{Name: "/new", Description: "Start a new session"},
 	{Name: "/sessions", Description: "Browse and resume sessions"},
 	{Name: "/compact", Description: "Compact current context"},

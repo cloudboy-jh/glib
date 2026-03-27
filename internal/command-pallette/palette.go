@@ -49,14 +49,14 @@ func Open(mode string, termW, termH int) tea.Cmd {
 	return func() tea.Msg {
 		palette := dialog.NewCommandPalette(items)
 
-		// Wide enough for command label + right-aligned keybind without overflow.
-		// Min 60, target 2/3 terminal width, cap at 90.
-		w := termW * 2 / 3
-		if w < 60 {
-			w = 60
+		// Keep command + keybind on one row in typical terminals.
+		// Min 76, target 3/4 terminal width, cap at 110.
+		w := termW * 3 / 4
+		if w < 76 {
+			w = 76
 		}
-		if w > 90 {
-			w = 90
+		if w > 110 {
+			w = 110
 		}
 
 		// Tall enough to show all groups. Min 20, target 2/3 terminal height, cap at 36.

@@ -25,6 +25,7 @@ By default, `glib` ships with a built-in GitHub OAuth client id so release users
 - `glib` uses GitHub Device Flow in-terminal.
 - Default scope is `repo` (supports private repositories).
 - Token is stored locally at your user config path (`<user-config-dir>/glib/github_token`).
+- User settings are stored at `<user-config-dir>/glib/config.json`.
 - Auth is embedded in the home/projects card under the wordmark.
 - `enter` starts sign-in; `l` clears local token.
 
@@ -133,7 +134,7 @@ PROJECTS
   - `j/k` — scroll up/down
 
 ### Slash Commands (PI)
-- `/models` — list and switch models
+- `/models` — open interactive model picker
 - `/new` — start new session
 - `/sessions` — browse sessions (UI placeholder)
 - `/compact` — compact context
@@ -170,6 +171,12 @@ PROJECTS
 - `GLIB_GITHUB_CLIENT_ID`: optional override for OAuth client id.
 - `GLIB_WORKSPACE_ROOT`: optional root directory for local backend clones.
 - `GLIB_ICONS`: icon mode (`safe` or nerd glyph defaults).
+
+## User Settings
+
+- Quick user settings are persisted in `<user-config-dir>/glib/config.json`.
+- Theme selection is auto-saved and restored on next app launch.
+- Last selected PI model is saved and applied when PI starts.
 
 ## Architecture Notes
 

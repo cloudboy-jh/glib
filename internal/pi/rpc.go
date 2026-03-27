@@ -66,6 +66,10 @@ func CmdCycleModel() map[string]any {
 	return map[string]any{"type": "cycle_model"}
 }
 
+func CmdSetModel(provider, modelID string) map[string]any {
+	return map[string]any{"type": "set_model", "provider": provider, "modelId": modelID}
+}
+
 func CmdExtensionUIResponse(id string, payload map[string]any) (map[string]any, error) {
 	if id == "" {
 		return nil, fmt.Errorf("missing extension ui request id")
