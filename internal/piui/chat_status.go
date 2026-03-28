@@ -13,12 +13,6 @@ func (s *Session) FooterState(icon, repo string) FooterState {
 	if strings.TrimSpace(repo) != "" {
 		prefix += " " + repo
 	}
-	if s.CmdPrefix {
-		return FooterState{
-			Context: prefix + " cmd: p projects  d diff  g git  i pi  m model  n session  G bottom  j/k scroll",
-			Scroll:  "awaiting key",
-		}
-	}
 	state := strings.TrimSpace(s.Status)
 	if state == "idle" {
 		state = ""

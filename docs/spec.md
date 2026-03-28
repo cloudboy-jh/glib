@@ -106,7 +106,7 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 - Viewer footer is hidden; app footer remains visible.
 - ANSI diff output must be preserved (no ANSI-stripping wrappers around viewer render).
 - `i` sends current file/diff context to PI (steer if active, start+preload if not).
-- Footer shows `i back to pi` when PI session is active.
+- `esc` in viewer returns to commit history; `esc` in commit history returns to PROJECTS repo picker.
 
 ## PI Contract (`i`)
 
@@ -114,15 +114,15 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 - Repo path is normalized to git root (`git rev-parse --show-toplevel`) before starting.
 - PI transport uses strict JSONL (`\n` delimiter) and a single stdout reader goroutine.
 - Renders streaming assistant text and tool blocks in glib body region.
-- Input-first keymap: typing goes to input; `ctrl+g` prefixes command shortcuts while focused.
-- Prefix shortcuts include mode jumps (`p`/`d`/`g`/`i`), session/model (`n`/`m`), and viewport follow/scroll (`G`/`j`/`k`).
+- Input-first keymap: typing goes to input.
+- Global mode cycle: `ctrl+space` cycles `DIFF` -> `PI` -> `GIT` (from non-ring modes, enters `DIFF`).
+- Global command palette: `ctrl+/` (and terminal alias `ctrl+_`) opens full mode-aware command list.
 - Stored quick settings (theme/model) are loaded from config and applied on startup/PI launch.
 - `ctrl+o` toggles inline tool output expansion, `ctrl+t` toggles thinking visibility.
-- `ctrl+d` jumps to DIFF, `ctrl+g` jumps to GIT (both preserve session).
 - `esc` soft-pauses: returns to `PROJECTS`, session stays alive in background.
 - Extension dialog requests (`extension_ui_request`) render as in-ring modals and respond with `extension_ui_response`.
 - Footer shows calm braille spinner only while PI is actively working (thinking/tool/retry/compaction).
-- Footer shows `● pi active  i resume` in PROJECTS when session persists.
+- Footer shows `● pi active` in PROJECTS when session persists.
 
 ### Slash Commands
 
@@ -144,7 +144,7 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 - Re-entering PI on same repo resumes existing session with full history.
 - Starting PI on different repo stops previous session.
 
-## Command Palette Contract (`ctrl+k`)
+## Command Palette Contract (`ctrl+/`)
 
 - Global shortcut opens mode-gated command palette.
 - Available actions depend on current mode.

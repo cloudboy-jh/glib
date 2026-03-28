@@ -46,6 +46,13 @@ var registry = []Command{
 // termW and termH should be model.width and model.height.
 func Open(mode string, termW, termH int) tea.Cmd {
 	items := dialogCommands(mode)
+	return openWithTitle("Commands", items, termW, termH)
+}
+
+func openWithTitle(title string, items []dialog.Command, termW, termH int) tea.Cmd {
+	if strings.TrimSpace(title) == "" {
+		title = "Commands"
+	}
 	return func() tea.Msg {
 		palette := dialog.NewCommandPalette(items)
 
@@ -69,7 +76,7 @@ func Open(mode string, termW, termH int) tea.Cmd {
 		}
 
 		return dialog.Open(dialog.Custom{
-			DialogTitle: "Commands",
+			DialogTitle: title,
 			Content:     palette,
 			Width:       w,
 			Height:      h,

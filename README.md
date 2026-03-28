@@ -4,6 +4,16 @@
 
 `glib` is a terminal workspace app for repository-first development: authenticate once, pick a repo, inspect and stage changes, review beautiful diffs, and hand off to pi without leaving one UI shell.
 
+## Why glib
+
+AI agents are fast. Reviewing their output is the hard part.
+
+Most terminal workflows drop you into a raw prompt with no project context loaded. You cd in, grep around, and hope the agent caught up. When it produces a diff, you're back to exiting fullscreen, hunting the file tree, scrolling to find the change — reading most of the file just to remember what it was doing.
+
+glib fixes the workflow, not just the tooling. You pick a repo and it preloads context: commits, diffs, docs. When pi produces a change, the diff is right there — rendered by bentodiffs, one keypress to go full screen, one keypress to go back. Git, diff, and agent chat are all reachable from the same shell without breaking your mental model.
+
+The review is the work. glib is built around that.
+
 ## Product Direction
 
 - Repo-first UX: you start from GitHub repositories, not local filesystem spelunking.
@@ -70,11 +80,8 @@ PROJECTS
 ## Key Controls
 
 ### Global
-- `ctrl+k` — open command palette
-- `p` — projects mode
-- `g` — git mode  
-- `d` — diff mode
-- `i` — pi mode (resume if active)
+- `ctrl+space` — cycle modes (`DIFF` → `PI` → `GIT`)
+- `ctrl+/` — open command palette
 - `t` — theme picker
 - `q` — quit
 
@@ -90,7 +97,7 @@ PROJECTS
 - `j/k` — navigate commit history
 - `enter` — open selected commit diff
 - `c` — toggle to open changes view
-- `esc/q` — back to projects
+- `esc/q` — back to projects repo picker
 
 ### Diff (Viewer)
 - `j/k` — scroll
@@ -98,6 +105,7 @@ PROJECTS
 - `n/N` — next/previous file
 - `c` — toggle to commit history
 - `i` — send current diff to PI
+- `esc/q` — back to commit history
 
 ### Git
 - `j/k` — move
@@ -125,13 +133,8 @@ PROJECTS
 - `esc` — soft pause (return to projects, session stays alive)
 - `ctrl+o` — toggle tool output expansion
 - `ctrl+t` — toggle thinking visibility
-- `ctrl+d` — jump to DIFF (session persists)
-- `ctrl+g` — prefix key for shortcuts while typing:
-  - `p/d/g/i` — mode switches
-  - `n` — new session
-  - `m` — cycle model
-  - `G` — scroll to bottom
-  - `j/k` — scroll up/down
+- `ctrl+space` — cycle modes while keeping session context
+- `ctrl+/` — open command palette
 
 ### Slash Commands (PI)
 - `/models` — open interactive model picker
@@ -162,7 +165,7 @@ PROJECTS
 
 - PI sessions are tied to repo path and persist until `/exit`, repo change, or app quit.
 - `esc` in PI does a soft pause — returns to PROJECTS without killing the process.
-- Footer shows `● pi active  i resume` in PROJECTS when a session is live.
+- Footer shows `● pi active` in PROJECTS when a session is live.
 - Re-entering PI on the same repo resumes the existing session with full history intact.
 - Cross-mode navigation (PI → DIFF → PI, PI → GIT → PI) preserves session state.
 
