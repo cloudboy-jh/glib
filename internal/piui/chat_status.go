@@ -17,12 +17,12 @@ func (s *Session) FooterState(icon, repo string) FooterState {
 	if state == "idle" {
 		state = ""
 	}
-	ctx := prefix + " enter send  esc back  ctrl+o tools  ctrl+t thinking"
+	ctx := strings.TrimSpace(prefix + " enter send  esc back")
 	if s.Streaming {
-		ctx = prefix + " enter send  esc abort  s steer  ctrl+o tools  ctrl+t thinking"
+		ctx = strings.TrimSpace(prefix + " enter send  esc abort  s steer")
 	}
 	if s.Modal.Active {
-		ctx = prefix + " modal active  enter confirm  esc cancel"
+		ctx = strings.TrimSpace(prefix + " modal active  enter confirm  esc cancel")
 		state = "awaiting input"
 	}
 	if s.ToolRunning {

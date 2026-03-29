@@ -1,7 +1,9 @@
 package app
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -227,6 +229,8 @@ type model struct {
 	piProc           *pi.PiProcess
 	piRepoPath       string
 	piPendingContext string
+	piStopRequested  bool
+	piRestartTried   bool
 	piui             *piui.Session
 	localDir         string
 	localEntries     []projects.Entry
@@ -592,10 +596,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case piStartMsg:
 		if msg.Err != nil {
+			if m.piRestartTried {
+				m.piRestartTried = false
+				m.piui.Status = "disconnected"
+				m.showError("pi restart failed: " + msg.Err.Error())
+				return m, nil
+			}
 			m.mode = modeProjects
 			m.showError("pi failed to start: " + msg.Err.Error())
 			return m, nil
 		}
+		m.piStopRequested = false
+		m.piRestartTried = false
 		m.piProc = msg.Proc
 		m.piRepoPath = strings.TrimSpace(m.projectPath)
 		m.piui.Status = "connected"
@@ -671,12 +683,30 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.readPiEventCmd()
 
 	case pi.PiExitMsg:
+		wasRequested := m.piStopRequested
+		m.piStopRequested = false
+		restartEligible := !wasRequested && m.mode == modePI && strings.TrimSpace(m.projectPath) != "" && !m.piRestartTried
+		if restartEligible {
+			draft := strings.TrimSpace(m.piui.Input.Value())
+			if draft != "" && strings.TrimSpace(m.piPendingContext) == "" {
+				m.piPendingContext = draft
+			}
+			if m.piui.Streaming && strings.TrimSpace(m.piPendingContext) == "" {
+				m.piPendingContext = "Continue from where we left off after the reconnect."
+			}
+		}
 		m.stopPi()
 		m.piui.StopStreaming()
 		m.piui.Streaming = false
 		m.piui.ToolRunning = false
 		m.piui.Status = "stopped"
-		if msg.Err != nil {
+		if restartEligible {
+			m.piRestartTried = true
+			m.piui.Status = "reconnecting"
+			m.statusMessage = "pi disconnected, reconnecting"
+			return m, m.startPiCmd()
+		}
+		if msg.Err != nil && !wasRequested && !isBenignPiExit(msg.Err) {
 			m.showError("pi exited: " + msg.Err.Error())
 			m.piui.Messages = append(m.piui.Messages, piui.Message{
 				Role: piui.RoleTool,
@@ -716,14 +746,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modePI {
 			return m.updatePIKeys(msg)
 		}
-
-		switch msg.String() {
-		case "ctrl+c":
+		rawKey := msg.String()
+		shortcutKey := normalizeShortcutKey(rawKey)
+		if shortcutKey == "ctrl+c" {
 			return m, m.quitCmd()
-		case "ctrl+space":
+		}
+		if shortcutKey == "ctrl+space" {
 			return m, m.cycleModes()
-		case "ctrl+/", "ctrl+_":
+		}
+		if isPaletteShortcut(shortcutKey) {
 			return m, commandpallette.Open(string(m.mode), m.width, m.height)
+		}
+
+		switch rawKey {
 		case "q":
 			if m.mode == modeProjects {
 				return m, m.quitCmd()
@@ -2232,9 +2267,11 @@ func (m *model) sendPiCmd(payload any) tea.Cmd {
 
 func (m *model) stopPi() {
 	if m.piProc == nil {
+		m.piStopRequested = false
 		m.piRepoPath = ""
 		return
 	}
+	m.piStopRequested = true
 	m.piProc.Stop()
 	m.piProc = nil
 	m.piRepoPath = ""
@@ -2278,13 +2315,18 @@ func (m *model) updatePIKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	switch msg.String() {
+	rawKey := msg.String()
+	shortcutKey := normalizeShortcutKey(rawKey)
+	switch shortcutKey {
 	case "ctrl+c":
 		return m, m.quitCmd()
 	case "ctrl+space":
 		return m, m.cycleModes()
-	case "ctrl+/", "ctrl+_":
+	case "ctrl+/":
 		return m, commandpallette.Open(string(m.mode), m.width, m.height)
+	}
+
+	switch rawKey {
 	case "ctrl+o":
 		m.piui.ToggleToolBody()
 		m.refreshAgentViewport()
@@ -3022,6 +3064,31 @@ func (m *model) findRepoRoot(path string) string {
 		path = parent
 	}
 	return ""
+}
+
+func normalizeShortcutKey(key string) string {
+	key = strings.ToLower(strings.TrimSpace(key))
+	switch key {
+	case "ctrl+_", "ctrl+?", "ctrl+7", "ctrl+slash":
+		return "ctrl+/"
+	default:
+		return key
+	}
+}
+
+func isPaletteShortcut(key string) bool {
+	return normalizeShortcutKey(key) == "ctrl+/"
+}
+
+func isBenignPiExit(err error) bool {
+	if err == nil || errors.Is(err, io.EOF) {
+		return true
+	}
+	text := strings.ToLower(strings.TrimSpace(err.Error()))
+	if text == "" {
+		return true
+	}
+	return strings.Contains(text, "signal: killed") || strings.Contains(text, "killed")
 }
 
 type staticTextModel struct {

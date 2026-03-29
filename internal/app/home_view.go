@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/cloudboy-jh/bentotui/registry/bricks/badge"
 	"github.com/cloudboy-jh/bentotui/registry/bricks/surface"
 	"github.com/cloudboy-jh/bentotui/registry/recipes/vimstatus"
 	"github.com/cloudboy-jh/bentotui/registry/rooms"
@@ -329,7 +330,9 @@ func (m *model) drawRepoProjectsView(surf *surface.Surface, bodyH int, t theme.T
 	}
 
 	header := lipgloss.NewStyle().Foreground(t.TextAccent()).Bold(true).Render(m.icons.Projects + "  Repositories")
-	meta := lipgloss.NewStyle().Foreground(t.TextMuted()).Render("backend: " + string(m.workspaceKind))
+	meta := lipgloss.NewStyle().Foreground(t.TextMuted()).Render(
+		fmt.Sprintf("backend: %s  repos: %d", m.workspaceKind, len(m.repos)),
+	)
 	content := lipgloss.JoinVertical(lipgloss.Left, header, meta, "", strings.Join(lines, "\n"))
 	block := lipgloss.NewStyle().
 		Background(t.BackgroundPanel()).
@@ -598,20 +601,18 @@ func (m *model) syncFooter() {
 	switch m.mode {
 	case modeProjects:
 		if m.authStatus != githubauth.StatusAuth {
-			cfg.Context = m.icons.Projects + " enter sign in  r retry  " + m.icons.Quit + " q quit"
+			cfg.Context = m.icons.Projects + " enter sign in  q quit"
 			cfg.Scroll = strings.ToLower(m.authStatus)
 		} else if m.picker == pickerRepos {
 			if m.repoActionOpen {
 				cfg.Context = m.icons.Projects + " h/l choose  enter run  esc back"
 			} else {
-				cfg.Context = m.icons.Projects + " j/k move  enter actions  b backend  n new  r refresh  ctrl+space cycle  ctrl+/ palette"
+				cfg.Context = m.icons.Projects + " j/k move  enter actions  esc back"
 			}
-			if len(m.repos) > 0 {
-				cfg.Position = fmt.Sprintf("%d/%d", min(m.repoDisplayLen(), m.repoCursor+1), m.repoDisplayLen())
-			}
+			cfg.Position = ""
 			cfg.Scroll = string(m.workspaceKind)
 		} else {
-			cfg.Context = m.icons.Projects + " n new  " + m.icons.Clone + " tab picker  ctrl+space cycle  ctrl+/ palette  " + m.icons.Quit + " q quit"
+			cfg.Context = m.icons.Projects + " j/k move  enter open  tab picker"
 			if len(m.localRows) > 0 {
 				cfg.Position = fmt.Sprintf("%d/%d", min(len(m.localRows), m.localCursor+1), len(m.localRows))
 			}
@@ -621,10 +622,10 @@ func (m *model) syncFooter() {
 		}
 	case modeDiff:
 		if m.diffView == diffViewHistory {
-			cfg.Context = m.icons.Diff + " commit history  enter open  l preview  esc projects"
-			cfg.Position = fmt.Sprintf("%d/%d", min(len(m.diffHistory), m.diffHistoryCur+1), max(1, len(m.diffHistory)))
+			cfg.Context = m.icons.Diff + " j/k move  enter open  esc projects"
+			cfg.Position = ""
 		} else {
-			cfg.Context = m.icons.Diff + " j/k scroll  n/N file  c commit history  i send to pi  esc history"
+			cfg.Context = m.icons.Diff + " j/k scroll  n/N file  i send to pi  esc history"
 		}
 		if m.diffView == diffViewOpen && m.diffViewer != nil {
 			st := m.diffViewer.State()
@@ -634,16 +635,16 @@ func (m *model) syncFooter() {
 	case modeGit:
 		switch m.gitView {
 		case gitViewBranches:
-			cfg.Context = m.icons.Git + " branches  enter switch  n new  D delete  esc back"
+			cfg.Context = m.icons.Git + " j/k move  enter switch  esc back"
 			cfg.Position = fmt.Sprintf("%d/%d", min(len(m.gitBranches), m.gitBranchCursor+1), max(1, len(m.gitBranches)))
 		case gitViewStash:
-			cfg.Context = m.icons.Git + " stash list  esc back"
+			cfg.Context = m.icons.Git + " j/k move  esc back"
 			cfg.Position = fmt.Sprintf("%d/%d", min(len(m.gitStash), m.gitStashCursor+1), max(1, len(m.gitStash)))
 		case gitViewLog:
-			cfg.Context = m.icons.Git + " log  enter open in diff  esc back"
+			cfg.Context = m.icons.Git + " j/k move  enter open diff  esc back"
 			cfg.Position = fmt.Sprintf("%d/%d", min(len(m.gitLog), m.gitLogCursor+1), max(1, len(m.gitLog)))
 		default:
-			cfg.Context = m.icons.Git + " s stage  u unstage  a/A all  c commit  b branches  l log  z/Z stash  i send to pi"
+			cfg.Context = m.icons.Git + " j/k move  s stage  u unstage  c commit"
 			rows := m.git.Rows()
 			if len(rows) > 0 {
 				cfg.Position = fmt.Sprintf("%d/%d", min(len(rows), m.git.Cursor+1), len(rows))
@@ -657,14 +658,37 @@ func (m *model) syncFooter() {
 		cfg.Position = st.Position
 	}
 
+	hotkeys := m.footerHotkeyCluster()
 	if strings.TrimSpace(cfg.Scroll) == "" {
-		cfg.Scroll = "CTRL+SPACE cycle  CTRL+/ palette"
+		cfg.Scroll = hotkeys
 	} else {
-		cfg.Scroll = "CTRL+SPACE cycle  CTRL+/ palette  " + cfg.Scroll
+		cfg.Scroll = hotkeys + "  ·  " + cfg.Scroll
 	}
 
 	m.footer.SetTheme(theme.CurrentTheme())
 	m.footer.SetConfig(cfg)
+}
+
+func (m *model) footerHotkeyCluster() string {
+	cycleKey := m.footerBadge("CTRL+SPACE", badge.VariantAccent)
+	cmdKey := m.footerBadge("CTRL+/", badge.VariantInfo)
+
+	if m.width < 88 {
+		return cycleKey
+	}
+	if m.width < 116 {
+		return cycleKey + " " + cmdKey
+	}
+	muted := lipgloss.NewStyle().Foreground(theme.CurrentTheme().FooterMuted())
+	return cycleKey + " " + muted.Render("cycle") + "  " + cmdKey + " " + muted.Render("cmds")
+}
+
+func (m *model) footerBadge(text string, variant badge.Variant) string {
+	b := badge.New(text)
+	b.SetTheme(theme.CurrentTheme())
+	b.SetBold(true)
+	b.SetVariant(variant)
+	return viewString(b.View())
 }
 
 func (m *model) footerModeLabel() string {
