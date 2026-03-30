@@ -32,7 +32,7 @@ var registry = []Command{
 	{Name: "New Pi Session", Description: "Start fresh session", Mode: "PI", ID: "pi.new", Keybind: "n"},
 	{Name: "Switch Model", Description: "Cycle model", Mode: "PI", ID: "pi.model", Keybind: "m"},
 	{Name: "Compact Context", Description: "Compact pi session", Mode: "PI", ID: "pi.compact"},
-	{Name: "Toggle Tool Output", Description: "Show/hide tool blocks", Mode: "PI", ID: "pi.tools", Keybind: "ctrl+o"},
+	{Name: "Toggle Tool Output", Description: "Show/hide tool blocks", Mode: "PI", ID: "pi.tools", Keybind: "ctrl+e"},
 	{Name: "Toggle Thinking", Description: "Show/hide thinking", Mode: "PI", ID: "pi.thinking", Keybind: "ctrl+t"},
 	{Name: "Export Session", Description: "Export to HTML", Mode: "PI", ID: "pi.export"},
 	{Name: "Rename Session", Description: "Set session display name", Mode: "PI", ID: "pi.rename"},
@@ -42,44 +42,26 @@ var registry = []Command{
 	{Name: "Open Settings", Description: "Open settings", Mode: "any", ID: "settings.open"},
 }
 
-// Open opens the command palette dialog sized proportionally to the terminal.
-// termW and termH should be model.width and model.height.
+// Open opens the command palette dialog using bentotui flow sizing.
 func Open(mode string, termW, termH int) tea.Cmd {
 	items := dialogCommands(mode)
 	return openWithTitle("Commands", items, termW, termH)
 }
 
 func openWithTitle(title string, items []dialog.Command, termW, termH int) tea.Cmd {
+	_ = termW
+	_ = termH
 	if strings.TrimSpace(title) == "" {
 		title = "Commands"
 	}
 	return func() tea.Msg {
 		palette := dialog.NewCommandPalette(items)
 
-		// Keep command + keybind on one row in typical terminals.
-		// Min 76, target 3/4 terminal width, cap at 110.
-		w := termW * 3 / 4
-		if w < 76 {
-			w = 76
-		}
-		if w > 110 {
-			w = 110
-		}
-
-		// Tall enough to show all groups. Min 20, target 2/3 terminal height, cap at 36.
-		h := termH * 2 / 3
-		if h < 20 {
-			h = 20
-		}
-		if h > 36 {
-			h = 36
-		}
-
 		return dialog.Open(dialog.Custom{
 			DialogTitle: title,
 			Content:     palette,
-			Width:       w,
-			Height:      h,
+			Width:       56,
+			Height:      18,
 		})
 	}
 }

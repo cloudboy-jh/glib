@@ -747,14 +747,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updatePIKeys(msg)
 		}
 		rawKey := msg.String()
-		shortcutKey := normalizeShortcutKey(rawKey)
-		if shortcutKey == "ctrl+c" {
+		if keyMatchesShortcut(msg, "ctrl+c") {
 			return m, m.quitCmd()
 		}
-		if shortcutKey == "ctrl+space" {
+		if keyMatchesShortcut(msg, "ctrl+space") {
 			return m, m.cycleModes()
 		}
-		if isPaletteShortcut(shortcutKey) {
+		if keyMatchesShortcut(msg, "ctrl+o") || keyMatchesShortcut(msg, "ctrl+/") {
 			return m, commandpallette.Open(string(m.mode), m.width, m.height)
 		}
 
@@ -2316,18 +2315,17 @@ func (m *model) updatePIKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	rawKey := msg.String()
-	shortcutKey := normalizeShortcutKey(rawKey)
-	switch shortcutKey {
-	case "ctrl+c":
+	switch {
+	case keyMatchesShortcut(msg, "ctrl+c"):
 		return m, m.quitCmd()
-	case "ctrl+space":
+	case keyMatchesShortcut(msg, "ctrl+space"):
 		return m, m.cycleModes()
-	case "ctrl+/":
+	case keyMatchesShortcut(msg, "ctrl+o"), keyMatchesShortcut(msg, "ctrl+/"):
 		return m, commandpallette.Open(string(m.mode), m.width, m.height)
 	}
 
 	switch rawKey {
-	case "ctrl+o":
+	case "ctrl+e":
 		m.piui.ToggleToolBody()
 		m.refreshAgentViewport()
 		return m, nil
@@ -3076,8 +3074,32 @@ func normalizeShortcutKey(key string) string {
 	}
 }
 
-func isPaletteShortcut(key string) bool {
-	return normalizeShortcutKey(key) == "ctrl+/"
+func keyMatchesShortcut(msg tea.KeyMsg, target string) bool {
+	target = normalizeShortcutKey(target)
+	if target == "" {
+		return false
+	}
+	key := msg.Key()
+	candidates := []string{
+		normalizeShortcutKey(msg.String()),
+		normalizeShortcutKey(key.Keystroke()),
+	}
+	if key.Mod&tea.ModCtrl != 0 {
+		switch key.Code {
+		case 0x1f, '/', '?':
+			candidates = append(candidates, "ctrl+/")
+		case ' ':
+			candidates = append(candidates, "ctrl+space")
+		case 'c', 'C':
+			candidates = append(candidates, "ctrl+c")
+		}
+	}
+	for _, c := range candidates {
+		if c == target {
+			return true
+		}
+	}
+	return false
 }
 
 func isBenignPiExit(err error) bool {

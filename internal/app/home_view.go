@@ -671,7 +671,7 @@ func (m *model) syncFooter() {
 
 func (m *model) footerHotkeyCluster() string {
 	cycleKey := m.footerBadge("CTRL+SPACE", badge.VariantAccent)
-	cmdKey := m.footerBadge("CTRL+/", badge.VariantInfo)
+	cmdKey := m.footerBadge("CTRL+O", badge.VariantInfo)
 
 	if m.width < 88 {
 		return cycleKey

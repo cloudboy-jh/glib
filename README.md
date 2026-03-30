@@ -81,7 +81,7 @@ PROJECTS
 
 ### Global
 - `ctrl+space` — cycle modes (`DIFF` → `PI` → `GIT`)
-- `ctrl+/` — open command palette
+- `ctrl+o` — open command palette (`ctrl+/` fallback)
 - `t` — theme picker
 - `q` — quit
 
@@ -131,10 +131,10 @@ PROJECTS
 - `/` — activate slash command picker
 - `tab` — autocomplete slash command
 - `esc` — soft pause (return to projects, session stays alive)
-- `ctrl+o` — toggle tool output expansion
+- `ctrl+e` — toggle tool output expansion
 - `ctrl+t` — toggle thinking visibility
 - `ctrl+space` — cycle modes while keeping session context
-- `ctrl+/` — open command palette
+- `ctrl+o` — open command palette (`ctrl+/` fallback)
 
 ### Slash Commands (PI)
 - `/models` — open interactive model picker

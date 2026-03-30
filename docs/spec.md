@@ -116,9 +116,9 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 - Renders streaming assistant text and tool blocks in glib body region.
 - Input-first keymap: typing goes to input.
 - Global mode cycle: `ctrl+space` cycles `DIFF` -> `PI` -> `GIT` (from non-ring modes, enters `DIFF`).
-- Global command palette: `ctrl+/` (and terminal alias `ctrl+_`) opens full mode-aware command list.
+- Global command palette: `ctrl+o` opens full mode-aware command list (`ctrl+/` accepted as fallback alias).
 - Stored quick settings (theme/model) are loaded from config and applied on startup/PI launch.
-- `ctrl+o` toggles inline tool output expansion, `ctrl+t` toggles thinking visibility.
+- `ctrl+e` toggles inline tool output expansion, `ctrl+t` toggles thinking visibility.
 - `esc` soft-pauses: returns to `PROJECTS`, session stays alive in background.
 - Extension dialog requests (`extension_ui_request`) render as in-ring modals and respond with `extension_ui_response`.
 - Footer shows calm braille spinner only while PI is actively working (thinking/tool/retry/compaction).
@@ -144,7 +144,7 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 - Re-entering PI on same repo resumes existing session with full history.
 - Starting PI on different repo stops previous session.
 
-## Command Palette Contract (`ctrl+/`)
+## Command Palette Contract (`ctrl+o`)
 
 - Global shortcut opens mode-gated command palette.
 - Available actions depend on current mode.
