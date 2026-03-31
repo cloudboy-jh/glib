@@ -3,7 +3,7 @@ package app
 import (
 	"strings"
 
-	"glib/internal/config"
+	"github.com/cloudboy-jh/glib/internal/config"
 )
 
 type settingsModel struct {

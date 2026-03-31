@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	bdcore "github.com/cloudboy-jh/bento-diffs/pkg/bentodiffs"
@@ -15,18 +16,18 @@ import (
 	selectx "github.com/cloudboy-jh/bentotui/registry/bricks/select"
 	"github.com/cloudboy-jh/bentotui/registry/recipes/vimstatus"
 	"github.com/cloudboy-jh/bentotui/theme"
-	commandpallette "glib/internal/command-pallette"
-	"glib/internal/diffs"
-	"glib/internal/git"
-	"glib/internal/githubauth"
-	"glib/internal/pi"
-	"glib/internal/piui"
-	"glib/internal/projects"
-	"glib/internal/slash"
-	"glib/internal/workspace"
+	commandpallette "github.com/cloudboy-jh/glib/internal/command-pallette"
+	"github.com/cloudboy-jh/glib/internal/diffs"
+	"github.com/cloudboy-jh/glib/internal/git"
+	"github.com/cloudboy-jh/glib/internal/githubauth"
+	"github.com/cloudboy-jh/glib/internal/pi"
+	"github.com/cloudboy-jh/glib/internal/piui"
+	"github.com/cloudboy-jh/glib/internal/projects"
+	"github.com/cloudboy-jh/glib/internal/slash"
+	"github.com/cloudboy-jh/glib/internal/workspace"
 )
 
-const version = "v0.3.3"
+const version = "v0.3.4"
 const useMockViews = false
 const defaultGitHubClientID = "Ov23lipqkO6lVZpjGTZJ"
 const githubAuthScope = "repo"
@@ -84,7 +85,6 @@ const (
 	promptNewProj    promptMode = "new_project"
 	promptDiffRev    promptMode = "diff_revision"
 	promptBranchNew  promptMode = "branch_new"
-	promptPIPause    promptMode = "pi_pause_confirm"
 	promptModelPick  promptMode = "model_pick"
 	promptCommitView promptMode = "commit_view"
 )
@@ -146,9 +146,13 @@ type authTokenMsg struct {
 }
 
 type reposMsg struct {
-	Repos []githubauth.Repo
-	Err   error
+	Repos  []githubauth.Repo
+	Err    error
+	Page   int
+	Append bool
 }
+
+type authPollTickMsg struct{}
 
 type piStartMsg struct {
 	Proc *pi.PiProcess
@@ -247,6 +251,8 @@ type model struct {
 	repos            []githubauth.Repo
 	repoCursor       int
 	repoPage         int
+	repoHasMore      bool
+	repoFilter       string
 	repoActionOpen   bool
 	repoActionCursor int
 	pendingLaunch    string
@@ -256,6 +262,8 @@ type model struct {
 	pendingSlash     map[string]string
 	slashSeq         int
 	reposLoading     bool
+	authPollDeadline time.Time
+	authPollInterval int
 	gitView          gitViewMode
 	gitBranches      []string
 	gitCurrentBranch string
@@ -493,11 +501,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if strings.TrimSpace(m.projectPath) != "" && strings.TrimSpace(m.projectPath) != strings.TrimSpace(msg.ProjectPath) {
-			if m.piSessionActiveForRepo(m.projectPath) {
-				m.stopPi()
-			}
+			m.piPendingContext = ""
 		}
-		m.projectPath = m.normalizeRepoPath(msg.ProjectPath)
+		m.rebindProjectPath(msg.ProjectPath)
 		if strings.TrimSpace(m.pendingRepoName) != "" {
 			m.activeRepoName = strings.TrimSpace(m.pendingRepoName)
 			m.pendingRepoName = ""
@@ -561,37 +567,86 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.authStatus = githubauth.StatusPending
 		m.authDevice = msg.Device
+		m.authPollInterval = max(1, msg.Device.Interval)
+		m.authPollDeadline = time.Now().Add(time.Duration(max(1, msg.Device.ExpiresIn)) * time.Second)
 		m.statusMessage = "approve device code in browser"
-		return m, m.pollAuthCmd(msg.Device)
+		return m, tea.Batch(m.pollAuthCmd(msg.Device), m.authPollTickCmd())
 
 	case authTokenMsg:
 		if msg.Err != nil {
 			m.authStatus = githubauth.StatusExpired
+			m.authPollDeadline = time.Time{}
+			m.authPollInterval = 0
 			m.showError(msg.Err.Error())
 			return m, nil
 		}
 		m.authToken = msg.Token
 		m.authStatus = githubauth.StatusAuth
+		m.authPollDeadline = time.Time{}
+		m.authPollInterval = 0
 		m.mode = modeProjects
 		m.picker = pickerRepos
 		m.statusMessage = "github auth complete"
-		return m, tea.Batch(m.persistTokenCmd(msg.Token), m.loadReposCmd())
+		m.repoPage = 1
+		m.repoHasMore = true
+		m.repoFilter = ""
+		return m, tea.Batch(m.persistTokenCmd(msg.Token), m.loadReposPageCmd(1, false))
+
+	case authPollTickMsg:
+		if m.authStatus != githubauth.StatusPending {
+			return m, nil
+		}
+		if !m.authPollDeadline.IsZero() && time.Now().After(m.authPollDeadline) {
+			return m, nil
+		}
+		return m, m.authPollTickCmd()
 
 	case reposMsg:
 		m.reposLoading = false
 		if msg.Err != nil {
+			if errors.Is(msg.Err, githubauth.ErrTokenExpired) {
+				m.authToken = ""
+				m.authStatus = githubauth.StatusExpired
+				m.authDevice = githubauth.DeviceCode{}
+				m.repoPage = 1
+				m.repoHasMore = false
+				m.repos = nil
+				m.showError(msg.Err.Error())
+				return m, m.clearTokenCmd()
+			}
 			m.showError(msg.Err.Error())
 			return m, nil
 		}
-		m.repos = m.orderRepos(msg.Repos)
+		if msg.Append {
+			for _, repo := range msg.Repos {
+				exists := false
+				for _, existing := range m.repos {
+					if existing.FullName == repo.FullName {
+						exists = true
+						break
+					}
+				}
+				if !exists {
+					m.repos = append(m.repos, repo)
+				}
+			}
+			m.repoPage = max(m.repoPage, msg.Page)
+		} else {
+			m.repos = m.orderRepos(msg.Repos)
+			m.repoPage = max(1, msg.Page)
+		}
+		m.repoHasMore = len(msg.Repos) >= 100
 		if len(m.repos) == 0 {
 			m.repoCursor = 0
 		} else {
-			m.repoCursor = m.lastRepoIndex()
+			m.repoCursor = clamp(m.repoCursor, 0, max(0, m.repoDisplayLen()-1))
 		}
 		m.repoActionOpen = false
 		m.repoActionCursor = 0
 		m.picker = pickerRepos
+		if !msg.Append {
+			m.statusMessage = "pick a repo and press enter to get started"
+		}
 		return m, nil
 
 	case piStartMsg:
@@ -615,6 +670,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		base := []tea.Cmd{
 			m.readPiEventCmd(),
 			piui.SpinnerTickCmd(),
+			m.sendPiCmd(pi.CmdSteer(m.repoBoundaryInstruction(m.projectPath))),
 			m.sendPiCmd(pi.CmdGetState()),
 			m.sendPiCmd(map[string]any{"type": "get_commands"}),
 			m.sendPiCmd(map[string]any{"type": "get_session_stats"}),
@@ -685,7 +741,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pi.PiExitMsg:
 		wasRequested := m.piStopRequested
 		m.piStopRequested = false
-		restartEligible := !wasRequested && m.mode == modePI && strings.TrimSpace(m.projectPath) != "" && !m.piRestartTried
+		activeRepo := m.normalizeRepoPath(m.projectPath)
+		procRepo := m.normalizeRepoPath(m.piRepoPath)
+		sameRepo := activeRepo != "" && procRepo != "" && activeRepo == procRepo
+		restartEligible := !wasRequested && m.mode == modePI && sameRepo && git.IsGitRepo(activeRepo) && !m.piRestartTried
 		if restartEligible {
 			draft := strings.TrimSpace(m.piui.Input.Value())
 			if draft != "" && strings.TrimSpace(m.piPendingContext) == "" {
@@ -779,22 +838,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.openPrompt(promptTheme, "Theme", "j/k move, enter apply, esc cancel", "")
 			return m, nil
 		case "i":
-			if m.mode == modeProjects {
-				return m, m.jumpToPI()
-			}
+			return m, m.jumpToPI()
 		case "D":
 			return m, m.jumpToDiff()
 		case "G":
 			return m, m.jumpToGit()
 		case "d":
-			if m.mode != modeProjects {
-				break
-			}
 			return m, m.jumpToDiff()
 		case "g":
-			if m.mode != modeProjects {
-				break
-			}
 			return m, m.jumpToGit()
 		case "p":
 			return m, m.jumpToProjects()
@@ -809,8 +860,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.authToken = ""
 					m.authStatus = githubauth.StatusSignedOut
 					m.authDevice = githubauth.DeviceCode{}
+					m.authPollDeadline = time.Time{}
+					m.authPollInterval = 0
 					m.repos = nil
+					m.repoFilter = ""
+					m.repoPage = 1
+					m.repoHasMore = false
 					m.picker = pickerLocal
+					m.statusMessage = "github token cleared"
 					return m, m.clearTokenCmd()
 				case "r":
 					return m, m.startAuthCmd()
@@ -856,15 +913,33 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				switch msg.String() {
 				case "j", "down":
 					m.repoCursor = clamp(m.repoCursor+1, 0, max(0, m.repoDisplayLen()-1))
+					if m.shouldFetchMoreRepos() {
+						return m, m.loadReposPageCmd(m.repoPage+1, true)
+					}
 					return m, nil
 				case "k", "up":
 					m.repoCursor = clamp(m.repoCursor-1, 0, max(0, m.repoDisplayLen()-1))
 					return m, nil
+				case "backspace":
+					if m.repoFilter != "" {
+						r := []rune(m.repoFilter)
+						m.repoFilter = string(r[:len(r)-1])
+						m.repoCursor = clamp(m.repoCursor, 0, max(0, m.repoDisplayLen()-1))
+					}
+					return m, nil
+				case "esc":
+					if m.repoFilter != "" {
+						m.repoFilter = ""
+						m.repoCursor = clamp(m.repoCursor, 0, max(0, m.repoDisplayLen()-1))
+						return m, nil
+					}
 				case "n":
 					m.openPrompt(promptNewProj, "New Project", "Enter folder path to create + git init", filepath.Join(m.localDir, "new-project"))
 					return m, m.promptInput.Focus()
 				case "r":
-					return m, m.loadReposCmd()
+					m.repoPage = 1
+					m.repoHasMore = true
+					return m, m.loadReposPageCmd(1, false)
 				case "b":
 					if m.workspaceKind == workspace.KindLocal {
 						m.workspaceKind = workspace.KindEphemeral
@@ -877,11 +952,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.statusMessage = "backend: " + string(m.workspaceKind)
 					return m, nil
 				case "enter":
-					if len(m.repos) == 0 {
+					if m.repoDisplayLen() == 0 {
 						return m, nil
 					}
 					m.repoActionOpen = true
 					m.repoActionCursor = 0
+					return m, nil
+				}
+				if typed := repoFilterKey(msg.String()); typed != "" {
+					m.repoFilter += typed
+					m.repoCursor = clamp(m.repoCursor, 0, max(0, m.repoDisplayLen()-1))
 					return m, nil
 				}
 				return m, nil
@@ -1124,7 +1204,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "d":
 				if f, ok := m.git.SelectedFile(); ok {
 					m.pendingPath = f.Path
-					m.openPrompt(promptDiscard, "Discard changes", "Type DISCARD and press enter", "")
+					m.openPrompt(promptDiscard, "Discard changes", "Discard selected file? y/n", "n")
 					return m, m.promptInput.Focus()
 				}
 			case "c":
@@ -1324,10 +1404,6 @@ func (m *model) updatePrompt(msg tea.KeyMsg) tea.Cmd {
 	case "enter":
 		val := strings.TrimSpace(m.promptInput.Value())
 		switch m.prompt {
-		case promptPIPause:
-			m.closePrompt()
-			m.mode = modeProjects
-			return m.inputBox.Focus()
 		case promptCloneDest:
 			m.closePrompt()
 			if val == "" {
@@ -1344,8 +1420,8 @@ func (m *model) updatePrompt(msg tea.KeyMsg) tea.Cmd {
 			return m.commitCmd(val)
 		case promptDiscard:
 			m.closePrompt()
-			if strings.ToUpper(val) != "DISCARD" {
-				m.showError("discard not confirmed")
+			if !isAffirmative(val) {
+				m.statusMessage = "discard cancelled"
 				return nil
 			}
 			if m.pendingPath == "" {
@@ -1415,11 +1491,34 @@ func (m *model) closePrompt() {
 }
 
 func (m *model) showError(errText string) {
-	m.errorText = errText
+	m.errorText = humanizeError(errText)
 	m.prompt = promptError
 	m.promptTitle = "Error"
 	m.promptHint = "Press enter or esc"
 	m.promptInput.SetValue("")
+}
+
+func humanizeError(errText string) string {
+	msg := strings.TrimSpace(errText)
+	lower := strings.ToLower(msg)
+	switch {
+	case strings.Contains(lower, "github repos failed: 401"):
+		return "Your GitHub token expired. Press enter to sign in again."
+	case strings.HasPrefix(lower, "not a git repo:"):
+		return "This directory isn't a git repository. Pick a different project."
+	case strings.Contains(lower, "pi failed to start") && strings.Contains(lower, "executable file not found"):
+		return "pi is not installed. Install it from https://shittycodingagent.ai and try again."
+	case strings.Contains(lower, "github token expired"):
+		return "Your GitHub token expired. Press enter to sign in again."
+	case strings.Contains(lower, "device flow token expired"):
+		return "Sign-in timed out. Press enter to request a new GitHub device code."
+	case strings.Contains(lower, "device flow access denied"):
+		return "GitHub sign-in was denied. Press enter to try again."
+	case strings.Contains(lower, "device flow timed out"):
+		return "Sign-in timed out. Press enter to request a new GitHub device code."
+	default:
+		return msg
+	}
 }
 
 func (m *model) resizeLocalPicker() {
@@ -1478,7 +1577,7 @@ func (m *model) activateLocalSelection() {
 			return
 		}
 		if git.IsGitRepo(row.Path) {
-			m.projectPath = m.normalizeRepoPath(row.Path)
+			m.rebindProjectPath(row.Path)
 			m.activeRepoName = inferRepoNameFromPath(m.projectPath)
 			m.addRecent(m.projectPath)
 			m.statusMessage = "project selected"
@@ -1489,7 +1588,7 @@ func (m *model) activateLocalSelection() {
 		return
 	}
 	if root := m.findRepoRoot(row.Path); root != "" {
-		m.projectPath = root
+		m.rebindProjectPath(root)
 		m.activeRepoName = inferRepoNameFromPath(root)
 		m.addRecent(root)
 		m.statusMessage = "project selected"
@@ -1662,47 +1761,74 @@ func (m *model) clearTokenCmd() tea.Cmd {
 	}
 }
 
+func (m *model) authPollTickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+		return authPollTickMsg{}
+	})
+}
+
 func (m *model) loadReposCmd() tea.Cmd {
+	m.repoPage = 1
+	m.repoHasMore = true
+	return m.loadReposPageCmd(1, false)
+}
+
+func (m *model) loadReposPageCmd(page int, appendPage bool) tea.Cmd {
 	if strings.TrimSpace(m.authToken) == "" {
 		return nil
 	}
-	m.reposLoading = true
-	page := m.repoPage
 	if page < 1 {
 		page = 1
 	}
+	if appendPage && (!m.repoHasMore || m.reposLoading) {
+		return nil
+	}
+	m.reposLoading = true
 	return func() tea.Msg {
 		repos, err := githubauth.ListRepos(m.authToken, page, 100)
-		return reposMsg{Repos: repos, Err: err}
+		return reposMsg{Repos: repos, Err: err, Page: page, Append: appendPage}
 	}
 }
 
-// repoDisplayLen returns the total number of rows in the display list
-// (synthetic "last repo" row + real repos).
+func (m *model) filteredRepos() []githubauth.Repo {
+	query := strings.TrimSpace(m.repoFilter)
+	if query == "" {
+		return m.repos
+	}
+	out := make([]githubauth.Repo, 0, len(m.repos))
+	for _, repo := range m.repos {
+		if fuzzyContains(query, repo.FullName) {
+			out = append(out, repo)
+		}
+	}
+	return out
+}
+
+func (m *model) repoDisplayRows() []githubauth.Repo {
+	return m.filteredRepos()
+}
+
 func (m *model) repoDisplayLen() int {
-	if m.lastRepo != "" && len(m.repos) > 0 {
-		return len(m.repos) + 1
-	}
-	return len(m.repos)
+	return len(m.repoDisplayRows())
 }
 
-// repoAtCursor resolves the actual repo from the current repoCursor,
-// accounting for the optional synthetic "last repo" row at index 0.
 func (m *model) repoAtCursor() (githubauth.Repo, bool) {
-	if len(m.repos) == 0 {
+	rows := m.repoDisplayRows()
+	if len(rows) == 0 {
 		return githubauth.Repo{}, false
 	}
-	hasSynth := m.lastRepo != ""
-	cur := m.repoCursor
-	if hasSynth {
-		if cur == 0 {
-			// synthetic row → resolve to the actual last repo (pinned first by orderRepos)
-			return m.repos[0], true
-		}
-		cur-- // shift past synthetic row
+	idx := clamp(m.repoCursor, 0, len(rows)-1)
+	return rows[idx], true
+}
+
+func (m *model) shouldFetchMoreRepos() bool {
+	if m.reposLoading || !m.repoHasMore || strings.TrimSpace(m.repoFilter) != "" {
+		return false
 	}
-	idx := clamp(cur, 0, len(m.repos)-1)
-	return m.repos[idx], true
+	if m.repoDisplayLen() == 0 {
+		return false
+	}
+	return m.repoCursor >= m.repoDisplayLen()-1
 }
 
 func (m *model) selectedRepo() (githubauth.Repo, bool) {
@@ -2235,7 +2361,7 @@ func (m *model) startPiCmd() tea.Cmd {
 			return piStartMsg{Err: fmt.Errorf("selected path is not a git repository")}
 		}
 	}
-	m.projectPath = targetDir
+	m.rebindProjectPath(targetDir)
 	if m.piSessionActiveForRepo(targetDir) {
 		return nil
 	}
@@ -2343,8 +2469,9 @@ func (m *model) updatePIKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.piui.Status = "aborting"
 			return m, m.sendPiCmd(pi.CmdAbort())
 		}
-		m.openPrompt(promptPIPause, "Leave PI", "session stays active • enter confirm • esc cancel", "")
-		return m, nil
+		m.mode = modeProjects
+		m.statusMessage = "pi paused"
+		return m, m.inputBox.Focus()
 	case "s":
 		if m.piui.Streaming {
 			m.piui.SteerMode = true
@@ -3039,6 +3166,28 @@ func (m *model) normalizeRepoPath(path string) string {
 	return filepath.Clean(path)
 }
 
+func (m *model) rebindProjectPath(path string) {
+	next := m.normalizeRepoPath(path)
+	prev := m.normalizeRepoPath(m.projectPath)
+	if next == "" {
+		m.projectPath = ""
+		m.piPendingContext = ""
+		return
+	}
+	if prev != "" && prev != next {
+		if m.piSessionActiveForRepo(prev) {
+			m.stopPi()
+			m.piui.StopStreaming()
+			m.piui.Streaming = false
+			m.piui.ToolRunning = false
+			m.piui.Status = "stopped"
+			m.piRestartTried = false
+		}
+		m.piPendingContext = ""
+	}
+	m.projectPath = next
+}
+
 func (m *model) findRepoRoot(path string) string {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -3072,6 +3221,58 @@ func normalizeShortcutKey(key string) string {
 	default:
 		return key
 	}
+}
+
+func repoFilterKey(key string) string {
+	if key == "space" {
+		return " "
+	}
+	if len(key) != 1 {
+		return ""
+	}
+	r := []rune(key)[0]
+	if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+		return string(r)
+	}
+	switch r {
+	case '/', '-', '_', '.', ':':
+		return string(r)
+	default:
+		return ""
+	}
+}
+
+func fuzzyContains(query, value string) bool {
+	query = strings.ToLower(strings.TrimSpace(query))
+	value = strings.ToLower(value)
+	if query == "" {
+		return true
+	}
+	if strings.Contains(value, query) {
+		return true
+	}
+	qr := []rune(query)
+	vr := []rune(value)
+	q := 0
+	for _, ch := range vr {
+		if q < len(qr) && ch == qr[q] {
+			q++
+		}
+	}
+	return q == len(qr)
+}
+
+func isAffirmative(v string) bool {
+	v = strings.ToLower(strings.TrimSpace(v))
+	return v == "y" || v == "yes"
+}
+
+func (m *model) repoBoundaryInstruction(repoPath string) string {
+	repoPath = m.normalizeRepoPath(repoPath)
+	if repoPath == "" {
+		return "Operate only inside the currently selected repository. Do not access parent directories or sibling repositories."
+	}
+	return "Repository boundary: only read/write files inside " + repoPath + ". Never access parent directories, sibling repositories, or absolute paths outside this root."
 }
 
 func keyMatchesShortcut(msg tea.KeyMsg, target string) bool {

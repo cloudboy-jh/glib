@@ -7,6 +7,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Release distribution scaffolding**: added `.goreleaser.yml` with cross-platform `glib` binaries (darwin/linux/windows, amd64/arm64), archives, and checksums.
+- **Repository state badges** in PROJECTS repo picker: per-repo `[local]` / `[clone needed]` status using workspace materialization checks.
+- **Repo picker filtering**: type-to-filter (owner/name) with backspace/escape clear behavior.
+- **PI repo boundary hardening plan doc**: `pi-repo-boundary-hardening-plan.md` with phased implementation and acceptance criteria.
+- **License**: added MIT `LICENSE`.
+
+### Changed
+
+- **Module path** changed from local `glib` to `github.com/cloudboy-jh/glib` and all internal imports were updated for release-style installs.
+- **README install flow** now documents `go install github.com/cloudboy-jh/glib/cmd/glib@latest` and `glib` as the user-facing entry command.
+- **Mode jump keys** `d/g/i/p` now work globally (outside PI input capture), not only from PROJECTS.
+- **PI escape behavior**: removed pause confirmation prompt; `esc` in PI now soft-pauses immediately to PROJECTS.
+- **Git discard confirmation** changed from typed `DISCARD` to a simple `y/n` prompt.
+- **DIFF history list height** now scales with terminal height (`max(5, bodyH/6)`).
+- **Projects auth screen copy** now includes explicit `repo` scope messaging and pending polling status.
+
+### Fixed
+
+- **GitHub auth expiry handling**: repo fetch `401 Unauthorized` now maps to token-expired behavior with clearer re-auth UX.
+- **Device-flow polling errors** now map to typed cases (`expired_token`, `access_denied`, timeout) instead of raw strings.
+- **Unicode wrapping bug** in `wrapPlainText`: removed byte slicing and switched to display-width-safe splitting.
+- **JSONL record limit** raised from 1MB to 4MB to prevent failures on larger tool outputs.
+- **Empty-state hints** added for branches/stashes in GIT mode (`n create branch`, `z stash current changes`).
+
+### Security
+
+- **PI repo binding tightened**:
+  - PI start path is normalized to absolute git root.
+  - process sets both `--cwd <repo>` and `cmd.Dir = <repo>`.
+  - startup includes explicit repo-boundary steering instruction.
+  - repo rebinding now stops old repo PI session and clears pending context to prevent cross-repo drift.
+
 ## [0.3.4] - 2026-03-27
 
 ### Added

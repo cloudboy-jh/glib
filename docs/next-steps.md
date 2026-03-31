@@ -12,17 +12,17 @@
 - [x] **GIT → PI handoff**: Send staged diff to PI
 - [x] **Repo path normalization**: PI runs in actual git root
 - [x] **Chat rendering**: Role-specific styles, markdown-aware assistant
+- [x] **Auth UX hardening**: scope messaging, typed device-flow errors, token-expiry handling
+- [x] **Repo picker upgrades**: owner/name filter, pagination, local-vs-clone-needed badges
+- [x] **Release packaging baseline**: GoReleaser config + LICENSE + README install path
+- [x] **PI repo boundary safeguards**: repo rebind on switch, stale pending context cleared, startup boundary steer
+- [x] **Global mode jumps**: `d/g/i/p` mode switching outside PI input capture
 
 ## Near-Term Priorities
 
-- Harden auth UX for release users:
-  - explicit scope messaging and revoke/logout clarity
-  - graceful handling of token expiry and device-flow polling errors
-- Improve repo picker quality:
-  - search/filter by owner/name
-  - pagination for large accounts/orgs
-  - clear state badges for local vs ephemeral materialization
 - Add smoke tests for core path: `PROJECTS(sign-in) -> repo action chooser -> DIFF/GIT/PI`.
+- Add retry-counter-based PI crash recovery (multi-retry with backoff) instead of single retry flag.
+- Implement inline diff rendering in PI chat for tool `write`/`edit` completions.
 
 ## Quality and Reliability
 
@@ -36,6 +36,7 @@
 
 - Stable mode transitions across all four modes.
 - Reliable private repo access through device flow with `repo` scope.
+- PI remains scoped to selected repo across session start/switch/restart.
 - Deterministic resize/theme behavior in every mode.
 - No duplicate chrome/footer and no ANSI color regressions in diff mode.
 - Release checklist and onboarding docs validated on clean machines.

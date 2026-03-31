@@ -13,9 +13,9 @@ import (
 	"github.com/cloudboy-jh/bentotui/registry/rooms"
 	"github.com/cloudboy-jh/bentotui/theme"
 	"github.com/cloudboy-jh/bentotui/theme/styles"
-	"glib/internal/diffs"
-	"glib/internal/git"
-	"glib/internal/githubauth"
+	"github.com/cloudboy-jh/glib/internal/diffs"
+	"github.com/cloudboy-jh/glib/internal/git"
+	"github.com/cloudboy-jh/glib/internal/githubauth"
 )
 
 func (m *model) View() tea.View {
@@ -106,8 +106,9 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 			statusStyle = statusStyle.Foreground(t.Error())
 		}
 
-		headline := lipgloss.NewStyle().Foreground(t.TextMuted()).Render("repo access")
+		headline := lipgloss.NewStyle().Foreground(t.TextMuted()).Render("terminal workspace — git + diff + pi in one shell")
 		statusLine := lipgloss.NewStyle().Bold(true).Foreground(t.Text()).Render("status: ") + statusStyle.Render(statusText)
+		scopeLine := lipgloss.NewStyle().Foreground(t.TextMuted()).Render("glib requests `repo` scope for private repository access")
 
 		buttonLabel := "Sign in with GitHub (enter)"
 		if m.authStatus == githubauth.StatusPending {
@@ -121,11 +122,23 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 			Bold(true).
 			Render(buttonLabel)
 
-		lines := []string{fitLine(headline, contentW), fitLine(statusLine, contentW), "", button}
+		lines := []string{fitLine(headline, contentW), fitLine(statusLine, contentW), fitLine(scopeLine, contentW), "", button}
 		if m.authStatus == githubauth.StatusPending {
 			codeLine := lipgloss.NewStyle().Foreground(t.Warning()).Render("Code: " + m.authDevice.UserCode)
 			urlLine := lipgloss.NewStyle().Foreground(t.TextMuted()).Render("Open: " + m.authDevice.VerificationURI)
-			lines = append(lines, "", fitLine(codeLine, contentW), fitLine(urlLine, contentW))
+			remaining := ""
+			if !m.authPollDeadline.IsZero() {
+				left := max(0, int(time.Until(m.authPollDeadline).Seconds()))
+				attempt := 1
+				if m.authPollInterval > 0 {
+					attempt = 1 + int(time.Since(m.authPollDeadline.Add(-time.Duration(max(1, m.authDevice.ExpiresIn))*time.Second)).Seconds())/max(1, m.authPollInterval)
+				}
+				remaining = fmt.Sprintf("Polling attempt %d • %02d:%02d remaining", max(1, attempt), left/60, left%60)
+			}
+			if remaining == "" {
+				remaining = "Waiting for GitHub approval"
+			}
+			lines = append(lines, "", fitLine(codeLine, contentW), fitLine(urlLine, contentW), fitLine(remaining, contentW))
 		}
 		body = lipgloss.JoinVertical(lipgloss.Left, lines...)
 	} else if m.picker == pickerClone {
@@ -253,11 +266,11 @@ var repoLoadingMessages = []string{
 
 func (m *model) drawRepoProjectsView(surf *surface.Surface, bodyH int, t theme.Theme, dim, bright lipgloss.Style) {
 	contentW := m.projectsContentWidth()
-	listH := 5
+	listH := clamp(bodyH/3, 6, 14)
 	rowW := max(8, contentW)
 	base := lipgloss.NewStyle().Background(t.BackgroundPanel()).Foreground(t.Text())
 	active := base.Copy().Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Bold(true)
-	synthStyle := base.Copy().Foreground(t.TextAccent())
+	muted := base.Copy().Foreground(t.TextMuted())
 	padRow := func(v string) string {
 		v = fitLine(v, rowW)
 		if lipgloss.Width(v) < rowW {
@@ -266,47 +279,28 @@ func (m *model) drawRepoProjectsView(surf *surface.Surface, bodyH int, t theme.T
 		return v
 	}
 	lines := make([]string, 0, listH)
-	if m.reposLoading {
+	displayRows := m.repoDisplayRows()
+	if m.reposLoading && len(displayRows) == 0 {
 		idx := (int(time.Now().UnixMilli()/600) % len(repoLoadingMessages))
 		msg := repoLoadingMessages[idx]
 		lines = append(lines, base.Copy().Foreground(t.TextMuted()).Render(padRow(msg)))
 		for len(lines) < listH {
 			lines = append(lines, base.Render(padRow("")))
 		}
-	} else if len(m.repos) == 0 {
+	} else if len(displayRows) == 0 {
 		lines = append(lines, base.Copy().Foreground(t.TextMuted()).Render(padRow("No repositories found. Press r to refresh.")))
 		for len(lines) < listH {
 			lines = append(lines, base.Render(padRow("")))
 		}
 	} else {
-		type repoRow struct {
-			label   string
-			repoIdx int
-			isSynth bool
-		}
-		displayRows := make([]repoRow, 0, len(m.repos)+1)
-		if m.lastRepo != "" && len(m.repos) > 0 {
-			displayRows = append(displayRows, repoRow{
-				label:   m.lastRepo,
-				repoIdx: 0,
-				isSynth: true,
-			})
-		}
-		for i, r := range m.repos {
-			displayRows = append(displayRows, repoRow{label: r.FullName, repoIdx: i})
-		}
-
 		total := len(displayRows)
 		start := windowStart(m.repoCursor, listH, total)
 		end := min(total, start+listH)
 		for i := start; i < end; i++ {
-			row := displayRows[i]
+			repo := displayRows[i]
 			prefix := "  "
 			marker := "  "
 			style := base
-			if row.isSynth {
-				style = synthStyle
-			}
 			if i == m.repoCursor {
 				prefix = "> "
 				style = active
@@ -316,13 +310,21 @@ func (m *model) drawRepoProjectsView(surf *surface.Surface, bodyH int, t theme.T
 			} else if i == end-1 && end < total {
 				marker = "v "
 			}
-			name := row.label
-			if row.isSynth {
-				name = "↩ " + row.label
-			} else if m.repos[row.repoIdx].Private {
+			name := repo.FullName
+			if repo.Private {
 				name += " (private)"
 			}
+			if m.workspace != nil {
+				if m.workspace.RepoExists(repo.FullName) {
+					name += "  [local]"
+				} else {
+					name += "  [clone needed]"
+				}
+			}
 			lines = append(lines, style.Render(padRow(marker+prefix+name)))
+		}
+		if m.reposLoading {
+			lines = append(lines, muted.Render(padRow("loading more repos...")))
 		}
 		for len(lines) < listH {
 			lines = append(lines, base.Render(padRow("")))
@@ -331,9 +333,13 @@ func (m *model) drawRepoProjectsView(surf *surface.Surface, bodyH int, t theme.T
 
 	header := lipgloss.NewStyle().Foreground(t.TextAccent()).Bold(true).Render(m.icons.Projects + "  Repositories")
 	meta := lipgloss.NewStyle().Foreground(t.TextMuted()).Render(
-		fmt.Sprintf("backend: %s  repos: %d", m.workspaceKind, len(m.repos)),
+		fmt.Sprintf("backend: %s  repos: %d  page: %d", m.workspaceKind, len(displayRows), m.repoPage),
 	)
-	content := lipgloss.JoinVertical(lipgloss.Left, header, meta, "", strings.Join(lines, "\n"))
+	filter := lipgloss.NewStyle().Foreground(t.TextMuted()).Render("filter: ") + lipgloss.NewStyle().Foreground(t.Text()).Render(fitLine(m.repoFilter, max(8, rowW-8)))
+	if strings.TrimSpace(m.repoFilter) == "" {
+		filter = lipgloss.NewStyle().Foreground(t.TextMuted()).Render("filter: type to search owner/name")
+	}
+	content := lipgloss.JoinVertical(lipgloss.Left, header, meta, filter, "", strings.Join(lines, "\n"))
 	block := lipgloss.NewStyle().
 		Background(t.BackgroundPanel()).
 		Border(lipgloss.RoundedBorder()).
@@ -350,7 +356,7 @@ func (m *model) drawRepoProjectsView(surf *surface.Surface, bodyH int, t theme.T
 	wmW := lipgloss.Width(wm)
 	wmH := lipgloss.Height(wm)
 
-	actionKbd := dim.Render("move ") + bright.Render("j/k") + dim.Render("  actions ") + bright.Render("enter") + dim.Render("  backend ") + bright.Render("b") + dim.Render("  refresh ") + bright.Render("r")
+	actionKbd := dim.Render("move ") + bright.Render("j/k") + dim.Render("  filter ") + bright.Render("type/backspace") + dim.Render("  actions ") + bright.Render("enter") + dim.Render("  backend ") + bright.Render("b") + dim.Render("  refresh ") + bright.Render("r")
 	actionBar := ""
 	if m.repoActionOpen {
 		item := func(label string, active bool) string {
@@ -362,9 +368,9 @@ func (m *model) drawRepoProjectsView(surf *surface.Surface, bodyH int, t theme.T
 			}
 			return st.Render(label)
 		}
-		diffItem := item(fmt.Sprintf("%s Diff", m.icons.Diff), m.repoActionCursor == 0)
-		gitItem := item(fmt.Sprintf("%s Git", m.icons.Git), m.repoActionCursor == 1)
-		piItem := item(fmt.Sprintf("%s Pi", m.icons.PI), m.repoActionCursor == 2)
+		diffItem := item(fmt.Sprintf("%s Diff — review changes", m.icons.Diff), m.repoActionCursor == 0)
+		gitItem := item(fmt.Sprintf("%s Git — stage & commit", m.icons.Git), m.repoActionCursor == 1)
+		piItem := item(fmt.Sprintf("%s Pi — AI agent", m.icons.PI), m.repoActionCursor == 2)
 		barLine := diffItem + "   " + gitItem + "   " + piItem
 		barW := lipgloss.Width(barLine) + 2
 		actionBar = lipgloss.NewStyle().
@@ -867,12 +873,12 @@ func wrapPlainText(text string, maxWidth int) []string {
 			continue
 		}
 		for lipgloss.Width(line) > maxWidth {
-			cut := maxWidth
-			if cut > len(line) {
-				cut = len(line)
+			head, tail := splitByDisplayWidth(line, maxWidth)
+			if head == "" {
+				break
 			}
-			out = append(out, line[:cut])
-			line = line[cut:]
+			out = append(out, head)
+			line = tail
 		}
 		out = append(out, line)
 	}
@@ -880,6 +886,30 @@ func wrapPlainText(text string, maxWidth int) []string {
 		return []string{""}
 	}
 	return out
+}
+
+func splitByDisplayWidth(text string, maxWidth int) (string, string) {
+	if maxWidth <= 0 || text == "" {
+		return "", text
+	}
+	runes := []rune(text)
+	width := 0
+	idx := 0
+	for idx < len(runes) {
+		rw := lipgloss.Width(string(runes[idx]))
+		if rw <= 0 {
+			rw = 1
+		}
+		if width+rw > maxWidth {
+			break
+		}
+		width += rw
+		idx++
+	}
+	if idx == 0 {
+		idx = 1
+	}
+	return string(runes[:idx]), string(runes[idx:])
 }
 
 func fitLine(text string, maxWidth int) string {

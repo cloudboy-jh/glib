@@ -8,7 +8,7 @@ import (
 	bdcore "github.com/cloudboy-jh/bento-diffs/pkg/bentodiffs"
 	"github.com/cloudboy-jh/bentotui/theme"
 	"github.com/cloudboy-jh/bentotui/theme/styles"
-	"glib/internal/git"
+	"github.com/cloudboy-jh/glib/internal/git"
 )
 
 const diffWordmark = "" +
@@ -28,7 +28,7 @@ type HistoryRender struct {
 }
 
 func RenderHistory(commits []git.CommitInfo, cursor, contentW, bodyW, bodyH int, icon string, t theme.Theme) HistoryRender {
-	listH := 5
+	listH := max(5, bodyH/6)
 	total := len(commits)
 	cur := clamp(cursor, 0, max(0, total-1))
 	// The block has Padding(0,1) + border (1px each side) = 4 chars of frame.

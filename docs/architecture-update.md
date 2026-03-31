@@ -1,4 +1,6 @@
-# glib — spec.md
+# glib — architecture-update.md
+
+> Legacy implementation notes. Source of truth is `docs/spec.md` and `docs/glib-flow.md`.
 
 > Terminal workspace for the AI coding era.  
 > One shell. Repo picker. Diff. Git. Pi chat. Done.
@@ -110,7 +112,7 @@ Focus ring wraps the entire body — message history, tool blocks, and input. Fo
 
 ## internal/pi — pi RPC process manager
 
-Package path: `glib/internal/pi`
+Package path: `github.com/cloudboy-jh/glib/internal/pi`
 
 ### Responsibilities
 

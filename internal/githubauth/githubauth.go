@@ -3,12 +3,20 @@ package githubauth
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+)
+
+var (
+	ErrTokenExpired     = errors.New("github token expired")
+	ErrAuthExpiredToken = errors.New("github device flow token expired")
+	ErrAuthAccessDenied = errors.New("github device flow access denied")
+	ErrAuthPendingTimed = errors.New("github device flow timed out")
 )
 
 const (
@@ -108,8 +116,10 @@ func PollAccessToken(clientID, deviceCode string, intervalSeconds int) (string, 
 			intervalSeconds += 2
 			time.Sleep(time.Duration(intervalSeconds) * time.Second)
 			continue
-		case "expired_token", "access_denied":
-			return "", fmt.Errorf("%s", out.Error)
+		case "expired_token":
+			return "", ErrAuthExpiredToken
+		case "access_denied":
+			return "", ErrAuthAccessDenied
 		default:
 			if out.ErrorDescription != "" {
 				return "", fmt.Errorf("%s", out.ErrorDescription)
@@ -117,7 +127,7 @@ func PollAccessToken(clientID, deviceCode string, intervalSeconds int) (string, 
 			return "", fmt.Errorf("oauth failed: %s", out.Error)
 		}
 	}
-	return "", fmt.Errorf("device flow timed out")
+	return "", ErrAuthPendingTimed
 }
 
 func ListRepos(token string, page, perPage int) ([]Repo, error) {
@@ -137,6 +147,9 @@ func ListRepos(token string, page, perPage int) ([]Repo, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, ErrTokenExpired
+	}
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("github repos failed: %s", resp.Status)
 	}

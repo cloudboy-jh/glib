@@ -3,7 +3,7 @@ package piui
 import (
 	"strings"
 
-	"glib/internal/pi"
+	"github.com/cloudboy-jh/glib/internal/pi"
 )
 
 func (s *Session) HandleEvent(evt pi.PiEventMsg) {

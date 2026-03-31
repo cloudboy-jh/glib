@@ -200,7 +200,7 @@ func RenderBranchesView(branches []string, current string, cursor int, width, he
 	lines := []string{}
 
 	if len(branches) == 0 {
-		lines = append(lines, lipgloss.NewStyle().Foreground(t.TextMuted()).Render("No local branches"))
+		lines = append(lines, lipgloss.NewStyle().Foreground(t.TextMuted()).Render("No local branches — n create branch"))
 	} else {
 		for i, b := range branches {
 			isCurrent := b == current
@@ -281,7 +281,7 @@ func RenderStashView(items []string, cursor int, width, height int, t theme.Them
 	lines := []string{}
 
 	if len(items) == 0 {
-		lines = append(lines, lipgloss.NewStyle().Foreground(t.TextMuted()).Render("No stashes"))
+		lines = append(lines, lipgloss.NewStyle().Foreground(t.TextMuted()).Render("No stashes — z stash current changes"))
 	} else {
 		for i, item := range items {
 			isSelected := i == cursor

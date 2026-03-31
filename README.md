@@ -25,8 +25,17 @@ The review is the work. glib is built around that.
 ## Quick Start
 
 ```bash
-go run ./cmd/glib
+glib
 ```
+
+## Install
+
+```bash
+go install github.com/cloudboy-jh/glib/cmd/glib@latest
+glib
+```
+
+Prebuilt binaries are published in GitHub Releases for macOS, Linux, and Windows.
 
 By default, `glib` ships with a built-in GitHub OAuth client id so release users can sign in immediately.
 
@@ -45,6 +54,8 @@ By default, `glib` ships with a built-in GitHub OAuth client id so release users
 - `GIT` (`g`): staged/unstaged/untracked operations with commit/push actions, branch management, and stash operations.
 - `DIFF` (`d`): list-first commit history and embedded `bento-diffs` viewer with file/hunk navigation.
 - `PI` (`i`): pi RPC chat/runtime in selected project directory with slash commands and session persistence.
+
+PI sessions are repo-scoped and boundary-hinted: glib starts pi in the normalized repo root, rebinds on repo switches, and injects an explicit repo-boundary instruction on session start.
 
 ## The Loop
 
@@ -69,7 +80,7 @@ PROJECTS
     └──► PI ─────────────────────────────────────┘
           persistent session per repo            │
           slash commands + command palette       │
-          tool edits trigger inline diff         │
+          repo-scoped session boundary           │
           jump to DIFF/GIT and back              │
           ESC = soft pause, session survives     │
           re-enter = resume session              │
@@ -82,6 +93,7 @@ PROJECTS
 ### Global
 - `ctrl+space` — cycle modes (`DIFF` → `PI` → `GIT`)
 - `ctrl+o` — open command palette (`ctrl+/` fallback)
+- `d/g/i/p` — jump to mode
 - `t` — theme picker
 - `q` — quit
 
@@ -91,6 +103,7 @@ PROJECTS
 - `b` — backend toggle (local/ephemeral)
 - `n` — new project
 - `r` — refresh repos
+- type / `backspace` — filter repos by owner/name
 - `tab` — toggle repo/local picker
 
 ### Diff (List-first)
@@ -168,6 +181,7 @@ PROJECTS
 - Footer shows `● pi active` in PROJECTS when a session is live.
 - Re-entering PI on the same repo resumes the existing session with full history intact.
 - Cross-mode navigation (PI → DIFF → PI, PI → GIT → PI) preserves session state.
+- Repo switches hard-rebind PI context: old repo sessions are stopped and pending context is cleared.
 
 ## Environment
 

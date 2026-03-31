@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const maxJSONLLineBytes = 1024 * 1024
+const maxJSONLLineBytes = 4 * 1024 * 1024
 
 func readJSONLRecord(r io.Reader, buf *[]byte) ([]byte, error) {
 	if cap(*buf) == 0 {

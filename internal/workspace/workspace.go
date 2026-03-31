@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"glib/internal/git"
+	"github.com/cloudboy-jh/glib/internal/git"
 )
 
 type Kind string
@@ -41,6 +41,27 @@ func NewManager(kind Kind) (*Manager, error) {
 
 func (m *Manager) SetKind(kind Kind) {
 	m.Kind = kind
+}
+
+func (m *Manager) RepoExists(fullName string) bool {
+	safeName := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(fullName)), "/", "__")
+	if safeName == "" {
+		return false
+	}
+	repoRoot := filepath.Join(m.Root, safeName)
+	if git.IsGitRepo(repoRoot) {
+		return true
+	}
+	if git.IsGitRepo(filepath.Join(repoRoot, "main")) {
+		return true
+	}
+	if git.IsGitRepo(filepath.Join(repoRoot, "base")) {
+		return true
+	}
+	if existing := strings.TrimSpace(m.ephemeral[safeName]); existing != "" && git.IsGitRepo(existing) {
+		return true
+	}
+	return false
 }
 
 func (m *Manager) EnsureRepo(fullName, cloneURL string) (string, error) {

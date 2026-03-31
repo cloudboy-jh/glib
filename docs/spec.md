@@ -60,21 +60,22 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 ## Projects Contract (`p`)
 
 - Source of truth is authenticated GitHub repo list.
-- Repo ordering follows recent activity; last selected repo is pinned first and focused.
+- Repo ordering follows GitHub ordering and supports owner/name filter input.
 - Navigation supports cursor movement and explicit refresh.
-- Repo list viewport is fixed to 5 visible rows with scroll window behavior.
+- Repo list viewport scales with terminal height and supports pagination for large accounts.
 - `enter` on repo opens an action chooser rendered below the repo card.
 - Action chooser is a compact horizontal bar rendered below the repo card.
 - Action chooser options:
-  - `Diff`: materialize repo, then route to `DIFF` mode (commit history first)
-  - `Git`: materialize repo, then route to `GIT` mode
-  - `Pi`: materialize repo, then route to `PI` mode
+  - `Diff — review changes`: materialize repo, then route to `DIFF` mode (commit history first)
+  - `Git — stage & commit`: materialize repo, then route to `GIT` mode
+  - `Pi — AI agent`: materialize repo, then route to `PI` mode
 - `esc` closes action chooser and returns focus to repo list.
 - Backend is switchable in-mode:
   - `local`: persisted checkout root (`GLIB_WORKSPACE_ROOT` or `~/glib-workspaces`)
   - `ephemeral`: cached base clone + session worktree per open action
 - Ephemeral cleanup runs on app quit and skips dirty worktrees.
 - Project selection sets active repository context for `GIT`, `DIFF`, and `PI`.
+- Repo rows show materialization state badges (`[local]` / `[clone needed]`).
 - Footer shows `● pi active  i resume` when PI session is live for selected repo.
 
 ## Distribution Contract
@@ -87,6 +88,7 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 
 - Shows branch, tracking, ahead/behind, and grouped staged/unstaged/untracked files.
 - Supports stage, unstage, discard (confirm), commit, push, pull, fetch.
+- Discard confirmation uses `y/n` prompt.
 - Supports stage all (`a`) and unstage all (`A`).
 - Branch panel (`b`): list, switch (`enter`), create (`n`), delete (`D`).
 - Stash operations: push (`z`), pop (`Z`), list (`?`).
@@ -112,14 +114,17 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 
 - Starts `pi --mode rpc --cwd <repo>` in active project directory.
 - Repo path is normalized to git root (`git rev-parse --show-toplevel`) before starting.
+- Process working directory is also set to normalized repo root (`cmd.Dir = <repo>`).
 - PI transport uses strict JSONL (`\n` delimiter) and a single stdout reader goroutine.
 - Renders streaming assistant text and tool blocks in glib body region.
 - Input-first keymap: typing goes to input.
 - Global mode cycle: `ctrl+space` cycles `DIFF` -> `PI` -> `GIT` (from non-ring modes, enters `DIFF`).
+- Global direct mode jumps: `d/g/i/p`.
 - Global command palette: `ctrl+o` opens full mode-aware command list (`ctrl+/` accepted as fallback alias).
 - Stored quick settings (theme/model) are loaded from config and applied on startup/PI launch.
 - `ctrl+e` toggles inline tool output expansion, `ctrl+t` toggles thinking visibility.
 - `esc` soft-pauses: returns to `PROJECTS`, session stays alive in background.
+- On PI start, glib injects a repo-boundary instruction so the agent stays inside selected repo root.
 - Extension dialog requests (`extension_ui_request`) render as in-ring modals and respond with `extension_ui_response`.
 - Footer shows calm braille spinner only while PI is actively working (thinking/tool/retry/compaction).
 - Footer shows `● pi active` in PROJECTS when session persists.
@@ -143,6 +148,7 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 - Session only terminates on: `/exit` command, repo change, or app quit.
 - Re-entering PI on same repo resumes existing session with full history.
 - Starting PI on different repo stops previous session.
+- Repo switches clear pending PI context to avoid cross-repo carryover.
 
 ## Command Palette Contract (`ctrl+o`)
 
@@ -157,7 +163,8 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 - `internal/app`: mode state machine, key routing, shell rendering.
 - `internal/pi`: pi process lifecycle + RPC protocol + JSONL transport.
 - `internal/piui`: PI chat session state, rendering, modal dialogs, footer status/spinner.
-- `internal/bentodiffs`: grouped git+diff domain state and git operations.
+- `internal/diffs`: diff domain rendering and viewer integration.
+- `internal/git`: git domain state, operations, and views.
 - `internal/githubauth`: OAuth device flow + repo API + token persistence.
 - `internal/workspace`: backend abstraction for local vs ephemeral repo materialization.
 - `internal/slash`: slash command registry and builtin definitions.

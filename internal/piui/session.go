@@ -8,7 +8,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	"github.com/cloudboy-jh/bentotui/registry/bricks/input"
 	"github.com/cloudboy-jh/bentotui/theme"
-	"glib/internal/slash"
+	"github.com/cloudboy-jh/glib/internal/slash"
 )
 
 type Session struct {

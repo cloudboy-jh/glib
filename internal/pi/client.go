@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -26,7 +28,17 @@ type PiProcess struct {
 }
 
 func Start(repoPath string) (*PiProcess, error) {
+	repoPath = strings.TrimSpace(repoPath)
+	if repoPath == "" {
+		return nil, fmt.Errorf("missing repository path")
+	}
+	absRepoPath, err := filepath.Abs(repoPath)
+	if err == nil {
+		repoPath = absRepoPath
+	}
 	cmd := exec.Command("pi", "--mode", "rpc", "--cwd", repoPath)
+	cmd.Dir = repoPath
+	cmd.Env = append(os.Environ(), "GLIB_REPO_ROOT="+repoPath, "GLIB_REPO_BOUNDARY=1")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

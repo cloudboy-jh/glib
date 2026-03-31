@@ -2,7 +2,7 @@ package diffs
 
 import (
 	bdcore "github.com/cloudboy-jh/bento-diffs/pkg/bentodiffs"
-	"glib/internal/git"
+	"github.com/cloudboy-jh/glib/internal/git"
 )
 
 type DiffState struct {

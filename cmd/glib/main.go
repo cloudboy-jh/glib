@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	tea "charm.land/bubbletea/v2"
-	"glib/internal/app"
+	"github.com/cloudboy-jh/glib/internal/app"
 )
 
 func main() {

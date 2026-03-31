@@ -1,4 +1,4 @@
-module glib
+module github.com/cloudboy-jh/glib
 
 go 1.25.2
 

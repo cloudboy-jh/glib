@@ -24,7 +24,7 @@ PROJECTS
     └──► PI ─────────────────────────────────────┘
           persistent session per repo            │
           slash commands + command palette       │
-          tool edits trigger inline diff         │
+          repo-scoped PI boundary                │
           jump to DIFF/GIT and back              │
           ESC = soft pause, session survives     │
           re-enter = resume session              │
@@ -72,6 +72,7 @@ All UI uses BentoTUI v0.6.0+ bricks, recipes, and rooms.
 ### Status view
 - Three sections: `Staged`, `Unstaged`, `Untracked`.
 - File operations: `s` stage, `u` unstage, `d` discard, `a` stage all, `A` unstage all.
+- Discard uses a `y/n` confirmation prompt.
 - `enter` on file opens it in DIFF mode.
 
 ### Commit flow
@@ -101,6 +102,7 @@ All UI uses BentoTUI v0.6.0+ bricks, recipes, and rooms.
 ### Session lifecycle
 - PI session starts when user enters PI mode on a repo.
 - Session is tied to repo path (normalized to git root).
+- PI process is started with repo-root cwd and receives an explicit repo-boundary instruction.
 - ESC = soft pause, return to PROJECTS, session stays alive.
 - Session persists until: `/exit`, repo change, or app quit.
 - PROJECTS footer badge: `● pi active` when session is live on selected repo.
@@ -110,25 +112,22 @@ All UI uses BentoTUI v0.6.0+ bricks, recipes, and rooms.
 - Available: `/models`, `/new`, `/sessions`, `/compact`, `/fork`, `/state`, `/stats`, `/commands`, `/thinking`, `/tools`, `/rename`, `/export`, `/undo`, `/theme`, `/help`, `/exit`.
 - Recognized commands don't appear as user chat turns.
 
-### PI → DIFF handoff
-- `ctrl+d` in PI mode: jump to DIFF view.
-- Session remains active, can return with `i` from DIFF footer.
-
-### PI → GIT handoff
-- `ctrl+g` in PI mode: jump to GIT mode.
-- Session remains active, can return with `i` from GIT footer.
+### PI → DIFF/GIT handoff
+- `d` in PI mode: jump to DIFF view.
+- `g` in PI mode: jump to GIT mode.
+- Session remains active while navigating between modes.
 
 ### Mode navigation
 | From | Key | To | Session preserved |
 |---|---|---|---|
 | PI | `esc` | PROJECTS | ✓ soft pause |
-| PI | `ctrl+d` | DIFF | ✓ stays alive |
-| PI | `ctrl+g` | GIT | ✓ stays alive |
+| PI | `d` | DIFF | ✓ stays alive |
+| PI | `g` | GIT | ✓ stays alive |
 | DIFF | `i` | PI | ✓ sends context |
 | GIT | `i` | PI | ✓ sends staged diff |
 | PROJECTS | `i` | PI | resumes or starts |
 
-## 5. Command Palette (`ctrl+k`)
+## 5. Command Palette (`ctrl+o`)
 
 - Global shortcut opens mode-gated command palette.
 - Mode-specific actions available based on current mode.
@@ -156,7 +155,8 @@ All UI uses BentoTUI v0.6.0+ bricks, recipes, and rooms.
 - [x] GIT → PI sends staged diff as context
 - [x] PI slash commands with autocomplete
 - [x] PI → DIFF and PI → GIT navigate without killing session
-- [x] Command palette (`ctrl+k`) with mode-gated actions
+- [x] Command palette (`ctrl+o`) with mode-gated actions
 - [x] Cross-mode footer shows active PI session indicator
 - [x] Repo path normalization (PI runs in git root, not editor dir)
+- [x] PI repo boundary hardening (repo rebind on switch, no stale pending context)
 - [x] No violent exits anywhere in the loop
