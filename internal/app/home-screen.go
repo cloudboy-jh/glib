@@ -372,12 +372,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.inputW = clamp(m.width*6/10, 50, 90)
 		m.inputBox.SetSize(m.inputW-5, 1)
-		m.promptInput.SetSize(max(20, m.width/2), 1)
+		m.promptInput.SetSize(m.promptBodyWidth(promptCommit), 1)
 		m.piui.SetSize(m.width, m.bodyHeight())
 		m.resizeLocalPicker()
 		m.footer.SetSize(m.width, 1)
 		if m.dialogs != nil {
 			m.dialogs.SetSize(m.width, m.height)
+		}
+		if m.prompt == promptTheme {
+			w, h := m.promptPickerSize(promptTheme)
+			m.themePicker.SetSize(w, h)
+		}
+		if m.prompt == promptModelPick {
+			w, h := m.promptPickerSize(promptModelPick)
+			m.modelPicker.SetSize(w, h)
 		}
 		if m.diffViewer != nil {
 			m.diffViewer.SetSize(max(20, m.width-2), max(1, m.bodyHeight()-2))
@@ -1470,6 +1478,7 @@ func (m *model) openPrompt(kind promptMode, title, hint, initial string) {
 	m.promptHint = hint
 	m.promptBody = ""
 	m.promptInput.SetValue(initial)
+	m.promptInput.SetSize(m.promptBodyWidth(kind), 1)
 }
 
 func (m *model) openCommitViewPrompt(title, hint, body string) {
@@ -1496,6 +1505,34 @@ func (m *model) showError(errText string) {
 	m.promptTitle = "Error"
 	m.promptHint = "Press enter or esc"
 	m.promptInput.SetValue("")
+	m.promptInput.SetSize(m.promptBodyWidth(promptError), 1)
+}
+
+func (m *model) promptBoxWidth(kind promptMode) int {
+	availW := max(44, m.width-6)
+	target := 64
+	switch kind {
+	case promptCommitView:
+		target = 84
+	case promptError:
+		target = 72
+	}
+	return clamp(target, 44, availW)
+}
+
+func (m *model) promptBodyWidth(kind promptMode) int {
+	return max(20, m.promptBoxWidth(kind)-6)
+}
+
+func (m *model) promptPickerSize(kind promptMode) (int, int) {
+	w := m.promptBodyWidth(kind)
+	targetH := 14
+	if kind == promptTheme {
+		targetH = 12
+	}
+	maxH := max(8, m.bodyHeight()-10)
+	h := clamp(targetH, 8, maxH)
+	return w, h
 }
 
 func humanizeError(errText string) string {
@@ -2815,7 +2852,8 @@ func (m *model) openModelPicker(data map[string]any) bool {
 		selectItems = append(selectItems, selectx.Item{Label: label, Value: it.ID})
 	}
 	m.modelPicker.SetItems(selectItems)
-	m.modelPicker.SetSize(max(36, m.width/2), max(10, min(20, m.bodyHeight()-8)))
+	w, h := m.promptPickerSize(promptModelPick)
+	m.modelPicker.SetSize(w, h)
 	m.modelPicker.Focus()
 	m.modelPicker.Open()
 	m.openPrompt(promptModelPick, "Model", "j/k move, enter set, esc cancel", "")
@@ -3046,7 +3084,8 @@ func (m *model) reloadThemeItems() {
 		items = append(items, selectx.Item{Label: n, Value: n})
 	}
 	m.themePicker.SetItems(items)
-	m.themePicker.SetSize(max(24, m.width/2), max(8, min(16, m.bodyHeight()-8)))
+	w, h := m.promptPickerSize(promptTheme)
+	m.themePicker.SetSize(w, h)
 	m.themePicker.Focus()
 	m.themePicker.Open()
 }

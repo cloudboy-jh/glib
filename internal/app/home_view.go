@@ -713,18 +713,7 @@ func (m *model) footerModeLabel() string {
 }
 
 func (m *model) renderPrompt(t theme.Theme) string {
-	availW := max(16, m.width-4)
-	boxW := m.width / 2
-	if boxW < 40 {
-		boxW = 40
-	}
-	if boxW > availW {
-		boxW = availW
-	}
-
-	if m.prompt == promptCommitView {
-		boxW = clamp(m.width*2/3, 48, min(availW, 90))
-	}
+	boxW := m.promptBoxWidth(m.prompt)
 
 	bodyW := max(10, boxW-6)
 

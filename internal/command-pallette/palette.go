@@ -49,21 +49,79 @@ func Open(mode string, termW, termH int) tea.Cmd {
 }
 
 func openWithTitle(title string, items []dialog.Command, termW, termH int) tea.Cmd {
-	_ = termW
-	_ = termH
 	if strings.TrimSpace(title) == "" {
 		title = "Commands"
 	}
 	return func() tea.Msg {
-		palette := dialog.NewCommandPalette(items)
+		palette := dialog.NewCommandPalette(flattenKeybinds(items))
+		w, h := paletteDialogSize(items, termW, termH)
 
 		return dialog.Open(dialog.Custom{
 			DialogTitle: title,
 			Content:     palette,
-			Width:       56,
-			Height:      18,
+			Width:       w,
+			Height:      h,
 		})
 	}
+}
+
+func paletteDialogSize(items []dialog.Command, termW, termH int) (int, int) {
+	maxW := termW - 4
+	if maxW < 52 {
+		maxW = 52
+	}
+	w := 64
+	if w > maxW {
+		w = maxW
+	}
+
+	groups := make(map[string]bool)
+	entryRows := 0
+	for _, it := range items {
+		entryRows++
+		g := strings.TrimSpace(it.Group)
+		if g == "" {
+			g = "Commands"
+		}
+		if !groups[g] {
+			groups[g] = true
+			entryRows++
+		}
+	}
+	if entryRows == 0 {
+		entryRows = 2
+	}
+
+	h := entryRows + 8
+	if h < 16 {
+		h = 16
+	}
+	if h > 24 {
+		h = 24
+	}
+	maxH := termH - 4
+	if maxH < 12 {
+		maxH = 12
+	}
+	if h > maxH {
+		h = maxH
+	}
+
+	return w, h
+}
+
+func flattenKeybinds(items []dialog.Command) []dialog.Command {
+	out := make([]dialog.Command, 0, len(items))
+	for _, it := range items {
+		if strings.TrimSpace(it.Keybind) == "" {
+			out = append(out, it)
+			continue
+		}
+		it.Label = it.Label + "  · " + it.Keybind
+		it.Keybind = ""
+		out = append(out, it)
+	}
+	return out
 }
 
 func dialogCommands(mode string) []dialog.Command {
