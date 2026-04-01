@@ -107,7 +107,7 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 - Rendering/navigation uses embedded `bento-diffs` viewer.
 - Viewer footer is hidden; app footer remains visible.
 - ANSI diff output must be preserved (no ANSI-stripping wrappers around viewer render).
-- `i` sends current file/diff context to PI (steer if active, start+preload if not).
+- `i` sends current file/diff context to PI and switches to PI (steer if active, start+preload if not).
 - `esc` in viewer returns to commit history; `esc` in commit history returns to PROJECTS repo picker.
 
 ## PI Contract (`i`)

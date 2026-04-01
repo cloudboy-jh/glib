@@ -138,7 +138,7 @@ All UI uses BentoTUI v0.6.0+ bricks, recipes, and rooms.
 | Mode | PI session active indicator |
 |---|---|
 | PROJECTS | `● pi active  i resume` |
-| DIFF | `i back to pi` |
+| DIFF | `i send diff context + switch to PI` |
 | GIT | `i back to pi` |
 | PI | normal PI footer |
 

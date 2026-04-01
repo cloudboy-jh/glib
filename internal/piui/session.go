@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/viewport"
 	"github.com/cloudboy-jh/bentotui/registry/bricks/input"
@@ -132,9 +133,14 @@ func (s *Session) StopStreaming() {
 
 func (s *Session) SpinnerFrame() string {
 	if s.Busy() {
-		return s.spinner.frame()
+		mode := s.spinnerMode()
+		return s.spinner.frame(mode)
 	}
 	return ""
+}
+
+func (s *Session) SpinnerInterval() time.Duration {
+	return spinnerInterval(s.spinnerMode())
 }
 
 func (s *Session) Busy() bool {
@@ -149,7 +155,18 @@ func (s *Session) Busy() bool {
 }
 
 func (s *Session) TickSpinner() {
-	s.spinner.tick()
+	s.spinner.tick(s.spinnerMode())
+}
+
+func (s *Session) spinnerMode() spinnerMode {
+	if s.ToolRunning || len(s.activeExec) > 0 {
+		return spinnerModeTool
+	}
+	state := strings.TrimSpace(strings.ToLower(s.Status))
+	if s.Streaming || state == "thinking" || state == "retrying" || state == "compacting" || state == "aborting" {
+		return spinnerModeThinking
+	}
+	return spinnerModeIdle
 }
 
 func (s *Session) OpenToolByID(id string, name string, args string) int {

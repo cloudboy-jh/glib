@@ -631,7 +631,7 @@ func (m *model) syncFooter() {
 			cfg.Context = m.icons.Diff + " j/k move  enter open  esc projects"
 			cfg.Position = ""
 		} else {
-			cfg.Context = m.icons.Diff + " j/k scroll  n/N file  i send to pi  esc history"
+			cfg.Context = m.icons.Diff + " j/k scroll  n/N file  i send + switch pi  esc history"
 		}
 		if m.diffView == diffViewOpen && m.diffViewer != nil {
 			st := m.diffViewer.State()

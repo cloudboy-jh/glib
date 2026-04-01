@@ -10,6 +10,7 @@ type DiffState struct {
 	CommitSHA    string
 	LoadedForDir string
 	SelectedPath string
+	Diffs        []bdcore.DiffResult
 }
 
 func MockDiffs() []bdcore.DiffResult {
@@ -26,5 +27,14 @@ func DiffForFile(repoPath, filePath string) (string, error) {
 		return out, err
 	}
 	out, _, err := git.RunGit(repoPath, "diff", "HEAD", "--", filePath)
+	return out, err
+}
+
+func DiffForCommitFile(repoPath, commitSHA, filePath string) (string, error) {
+	if filePath == "" {
+		out, _, err := git.RunGit(repoPath, "show", commitSHA, "--")
+		return out, err
+	}
+	out, _, err := git.RunGit(repoPath, "show", commitSHA, "--", filePath)
 	return out, err
 }

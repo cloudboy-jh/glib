@@ -164,8 +164,9 @@ type piSendMsg struct {
 }
 
 type piContextMsg struct {
-	Text string
-	Err  error
+	Text   string
+	Status string
+	Err    error
 }
 
 type workspaceCleanupMsg struct {
@@ -442,7 +443,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.diff.Source = msg.Source
 		m.diff.CommitSHA = msg.CommitSHA
 		m.diff.LoadedForDir = msg.ProjectDir
-		m.diff.SelectedPath = msg.SelectedPath
+		m.diff.Diffs = msg.Diffs
+		if strings.TrimSpace(msg.SelectedPath) != "" {
+			m.diff.SelectedPath = strings.TrimSpace(msg.SelectedPath)
+		} else {
+			m.syncDiffSelectedPathFromViewer()
+		}
 		return m, nil
 
 	case diffHistoryMsg:
@@ -677,7 +683,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshAgentViewport()
 		base := []tea.Cmd{
 			m.readPiEventCmd(),
-			piui.SpinnerTickCmd(),
+			piui.SpinnerTickCmd(m.piui.SpinnerInterval()),
 			m.sendPiCmd(pi.CmdSteer(m.repoBoundaryInstruction(m.projectPath))),
 			m.sendPiCmd(pi.CmdGetState()),
 			m.sendPiCmd(map[string]any{"type": "get_commands"}),
@@ -709,10 +715,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showError(msg.Err.Error())
 			return m, nil
 		}
+		if strings.TrimSpace(msg.Status) != "" {
+			m.statusMessage = strings.TrimSpace(msg.Status)
+		}
 		if strings.TrimSpace(msg.Text) == "" {
 			return m, nil
 		}
 		m.mode = modePI
+		if strings.TrimSpace(msg.Status) == "" {
+			m.statusMessage = "sent diff context to PI"
+		}
 		if m.piSessionActiveForRepo(m.projectPath) {
 			return m, m.sendPiCmd(pi.CmdPromptWithStreamingBehavior(msg.Text, "steer"))
 		}
@@ -791,7 +803,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case piui.SpinnerTickMsg:
 		m.piui.TickSpinner()
 		if m.mode == modePI {
-			return m, piui.SpinnerTickCmd()
+			return m, piui.SpinnerTickCmd(m.piui.SpinnerInterval())
 		}
 		return m, nil
 
@@ -846,7 +858,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.openPrompt(promptTheme, "Theme", "j/k move, enter apply, esc cancel", "")
 			return m, nil
 		case "i":
-			return m, m.jumpToPI()
+			if !(m.mode == modeDiff && m.diffView == diffViewOpen) {
+				return m, m.jumpToPI()
+			}
 		case "D":
 			return m, m.jumpToDiff()
 		case "G":
@@ -1109,8 +1123,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.diffViewer.ScrollUp(halfPage)
 			case "n":
 				m.diffViewer.NextFile()
+				m.syncDiffSelectedPathFromViewer()
 			case "N":
 				m.diffViewer.PrevFile()
+				m.syncDiffSelectedPathFromViewer()
 			case "c":
 				return m, m.loadDiffHistoryCmd()
 			case "}":
@@ -2344,6 +2360,29 @@ func diffFileIndexByPath(diffs []bdcore.DiffResult, selectedPath string) int {
 	return 0
 }
 
+func diffPath(d bdcore.DiffResult) string {
+	newName := strings.TrimSpace(strings.TrimPrefix(d.NewFile, "b/"))
+	oldName := strings.TrimSpace(strings.TrimPrefix(d.OldFile, "a/"))
+	displayName := strings.TrimSpace(strings.TrimPrefix(d.DisplayFile, "b/"))
+	switch {
+	case displayName != "":
+		return displayName
+	case newName != "":
+		return newName
+	default:
+		return oldName
+	}
+}
+
+func (m *model) syncDiffSelectedPathFromViewer() {
+	if m.diffViewer == nil || len(m.diff.Diffs) == 0 {
+		return
+	}
+	st := m.diffViewer.State()
+	idx := clamp(st.ActiveFile, 0, len(m.diff.Diffs)-1)
+	m.diff.SelectedPath = diffPath(m.diff.Diffs[idx])
+}
+
 func (m *model) piSessionActiveForRepo(repoPath string) bool {
 	repoPath = m.normalizeRepoPath(repoPath)
 	if repoPath == "" || m.piProc == nil || !m.piProc.Running() {
@@ -2356,21 +2395,48 @@ func (m *model) sendDiffContextToPiCmd() tea.Cmd {
 	if strings.TrimSpace(m.projectPath) == "" {
 		return nil
 	}
+	m.syncDiffSelectedPathFromViewer()
+	repoPath := strings.TrimSpace(m.projectPath)
+	source := strings.TrimSpace(m.diff.Source)
+	if source == "" {
+		source = "working"
+	}
+	commitSHA := strings.TrimSpace(m.diff.CommitSHA)
 	selected := strings.TrimSpace(m.diff.SelectedPath)
 	return func() tea.Msg {
-		d, err := diffs.DiffForFile(m.projectPath, selected)
+		var (
+			d   string
+			err error
+		)
+		switch source {
+		case "commit":
+			if commitSHA == "" {
+				return piContextMsg{Err: fmt.Errorf("missing commit SHA for diff context")}
+			}
+			d, err = diffs.DiffForCommitFile(repoPath, commitSHA, selected)
+		default:
+			d, err = diffs.DiffForFile(repoPath, selected)
+		}
 		if err != nil {
 			return piContextMsg{Err: err}
 		}
 		if strings.TrimSpace(d) == "" {
-			return piContextMsg{}
+			return piContextMsg{Status: "no diff context to send"}
 		}
 		name := selected
 		if strings.TrimSpace(name) == "" {
-			name = "working tree"
+			if source == "commit" {
+				short := commitSHA
+				if len(short) > 7 {
+					short = short[:7]
+				}
+				name = "commit " + short
+			} else {
+				name = "working tree"
+			}
 		}
 		text := fmt.Sprintf("Here is the current diff for %s:\n\n%s\n\nWhat would you like to do?", name, d)
-		return piContextMsg{Text: text}
+		return piContextMsg{Text: text, Status: "sent diff context to PI"}
 	}
 }
 
