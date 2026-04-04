@@ -4,6 +4,16 @@
 
 `glib` is a terminal workspace app for repository-first development: authenticate once, pick a repo, inspect and stage changes, review beautiful diffs, and hand off to pi without leaving one UI shell.
 
+![Projects view](./readme-app-launch.png)
+
+<details>
+<summary>More screenshots</summary>
+
+![Diff view](./diff-screenshot.png)
+
+![PI view](./pi-screenshot.png)
+</details>
+
 ## Why glib
 
 AI agents are fast. Reviewing their output is the hard part.
@@ -25,8 +35,10 @@ The review is the work. glib is built around that.
 ## Quick Start
 
 ```bash
-glib
+go run ./cmd/glib
 ```
+
+Use the installed `glib` binary once the first release is cut.
 
 ## Install
 
