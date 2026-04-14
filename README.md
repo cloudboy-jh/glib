@@ -47,6 +47,39 @@ go install github.com/cloudboy-jh/glib/cmd/glib@latest
 glib
 ```
 
+If `glib` is not found after `go install`, your Go bin directory is not in `PATH`.
+
+### macOS + Ghostty (zsh)
+
+```bash
+echo 'export PATH="$HOME/go/bin:$PATH"' >> ~/.zshrc
+echo 'export PATH="$HOME/go/bin:$PATH"' >> ~/.zprofile
+source ~/.zprofile && source ~/.zshrc
+hash -r
+```
+
+Or run the repo installer, which installs `glib` and configures zsh `PATH` automatically:
+
+```bash
+./scripts/install.sh
+```
+
+Verify the install:
+
+```bash
+command -v glib
+```
+
+Expected output includes a path ending in `glib` (for example, `/Users/<you>/go/bin/glib`).
+
+Troubleshooting:
+
+```bash
+go env GOPATH GOBIN
+```
+
+Make sure your active Go bin path (`$GOBIN` when set, otherwise `$GOPATH/bin`) is in `PATH`.
+
 Prebuilt binaries are published in GitHub Releases for macOS, Linux, and Windows.
 
 By default, `glib` ships with a built-in GitHub OAuth client id so release users can sign in immediately.
