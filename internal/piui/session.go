@@ -2,6 +2,7 @@ package piui
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +34,10 @@ type Session struct {
 	ModelName     string
 	ThinkingLevel string
 	TokenTotal    int
+	TokenRaw      int
+	TokenInput    int
+	TokenOutput   int
+	TokenReason   int
 	ContextWindow int
 	ContextPct    int
 	Cost          float64
@@ -334,6 +339,7 @@ func (s *Session) ApplyState(data map[string]any) {
 	s.ThinkingLevel = nonEmptyString(asString(data["thinkingLevel"]), s.ThinkingLevel)
 	s.SessionName = nonEmptyString(asString(data["sessionName"]), s.SessionName)
 	s.SessionID = nonEmptyString(asString(data["sessionId"]), s.SessionID)
+	s.recomputeTokenUsage()
 	s.recomputeContextPct()
 }
 
@@ -342,7 +348,18 @@ func (s *Session) ApplyStats(data map[string]any) {
 		return
 	}
 	tokens := asMap(data["tokens"])
-	s.TokenTotal = asInt(tokens["total"], s.TokenTotal)
+	s.TokenInput = asInt(tokens["input"], s.TokenInput)
+	s.TokenOutput = asInt(tokens["output"], s.TokenOutput)
+	s.TokenReason = asInt(tokens["reasoning"], s.TokenReason)
+	if s.TokenReason == 0 {
+		s.TokenReason = asInt(tokens["reasoningTokens"], s.TokenReason)
+	}
+	raw := asInt(tokens["total"], s.TokenRaw)
+	if raw <= 0 {
+		raw = s.TokenInput + s.TokenOutput + s.TokenReason
+	}
+	s.TokenRaw = raw
+	s.recomputeTokenUsage()
 	s.Cost = asFloat(data["cost"], s.Cost)
 	s.recomputeContextPct()
 }
@@ -572,6 +589,31 @@ func (s *Session) recomputeContextPct() {
 		pct = 999
 	}
 	s.ContextPct = pct
+}
+
+func (s *Session) recomputeTokenUsage() {
+	weight := thinkingTokenWeight(s.ThinkingLevel)
+	adjusted := s.TokenInput + s.TokenOutput + int(math.Round(float64(s.TokenReason)*weight))
+	if adjusted <= 0 {
+		adjusted = s.TokenRaw
+	}
+	if adjusted < 0 {
+		adjusted = 0
+	}
+	s.TokenTotal = adjusted
+}
+
+func thinkingTokenWeight(level string) float64 {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "low":
+		return 0.85
+	case "med", "medium":
+		return 1.00
+	case "high":
+		return 1.20
+	default:
+		return 1.00
+	}
 }
 
 func nonEmptyString(values ...string) string {

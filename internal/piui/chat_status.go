@@ -17,9 +17,9 @@ func (s *Session) FooterState(icon, repo string) FooterState {
 	if state == "idle" {
 		state = ""
 	}
-	ctx := strings.TrimSpace(prefix + " enter send  esc back")
+	ctx := strings.TrimSpace(prefix + " ↑/↓ scroll  pgup/pgdn  enter send  esc back")
 	if s.Streaming {
-		ctx = strings.TrimSpace(prefix + " enter send  esc abort  s steer")
+		ctx = strings.TrimSpace(prefix + " ↑/↓ scroll  pgup/pgdn  enter send  esc abort  s steer")
 	}
 	if s.Modal.Active {
 		ctx = strings.TrimSpace(prefix + " modal active  enter confirm  esc cancel")

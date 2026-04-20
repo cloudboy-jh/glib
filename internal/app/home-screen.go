@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -307,7 +308,7 @@ func NewModel() *model {
 		}
 	}
 
-	cwd, _ := os.Getwd()
+	launchDir := resolveInitialLocalDir()
 	m := &model{
 		footer:        vimstatus.New(theme.CurrentTheme()),
 		dialogs:       dialog.New(),
@@ -320,7 +321,7 @@ func NewModel() *model {
 		modelPicker:   mp,
 		mode:          modeProjects,
 		picker:        pickerLocal,
-		localDir:      cwd,
+		localDir:      launchDir,
 		localExpanded: map[string]bool{},
 		icons:         resolveIcons(),
 		diff:          diffs.DiffState{},
@@ -345,6 +346,12 @@ func NewModel() *model {
 		m.ensureDiffViewer()
 		m.diffViewer.SetDiffs(diffs.MockDiffs())
 		m.git = git.MockGitState()
+	}
+	if root := m.findRepoRoot(m.localDir); root != "" {
+		m.localDir = root
+		m.rebindProjectPath(root)
+		m.activeRepoName = inferRepoNameFromPath(root)
+		m.addRecent(root)
 	}
 	_ = m.reloadLocalEntries()
 	return m
@@ -1122,11 +1129,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+u", "pgup":
 				m.diffViewer.ScrollUp(halfPage)
 			case "n":
-				m.diffViewer.NextFile()
-				m.syncDiffSelectedPathFromViewer()
+				m.jumpDiffFile(1)
 			case "N":
-				m.diffViewer.PrevFile()
-				m.syncDiffSelectedPathFromViewer()
+				m.jumpDiffFile(-1)
+			case "tab":
+				m.jumpDiffFile(1)
+			case "shift+tab":
+				m.jumpDiffFile(-1)
 			case "c":
 				return m, m.loadDiffHistoryCmd()
 			case "}":
@@ -1724,6 +1733,47 @@ func resolveGitHubClientID() string {
 		return v
 	}
 	return defaultGitHubClientID
+}
+
+func resolveInitialLocalDir() string {
+	candidates := []string{
+		os.Getenv("GLIB_EDITOR_PATH"),
+		os.Getenv("GLIB_EDITOR_CWD"),
+		os.Getenv("VSCODE_CWD"),
+		os.Getenv("PWD"),
+	}
+	for _, raw := range candidates {
+		if path := normalizeDirCandidate(raw); path != "" {
+			return path
+		}
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	if abs, err := filepath.Abs(cwd); err == nil {
+		return abs
+	}
+	return cwd
+}
+
+func normalizeDirCandidate(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(raw)
+	if err == nil {
+		raw = abs
+	}
+	st, err := os.Stat(raw)
+	if err != nil {
+		return ""
+	}
+	if st.IsDir() {
+		return filepath.Clean(raw)
+	}
+	return filepath.Clean(filepath.Dir(raw))
 }
 
 func buildTreeRows(entries []projects.Entry, prefix string, expanded map[string]bool) []localTreeRow {
@@ -2383,6 +2433,27 @@ func (m *model) syncDiffSelectedPathFromViewer() {
 	m.diff.SelectedPath = diffPath(m.diff.Diffs[idx])
 }
 
+func (m *model) jumpDiffFile(delta int) {
+	if m.diffViewer == nil || delta == 0 {
+		return
+	}
+	before := m.diffViewer.State()
+	if delta > 0 {
+		for i := 0; i < delta; i++ {
+			m.diffViewer.NextFile()
+		}
+	} else {
+		for i := 0; i < -delta; i++ {
+			m.diffViewer.PrevFile()
+		}
+	}
+	after := m.diffViewer.State()
+	if after.ActiveFile != before.ActiveFile && after.Scroll > 0 {
+		m.diffViewer.ScrollUp(after.Scroll)
+	}
+	m.syncDiffSelectedPathFromViewer()
+}
+
 func (m *model) piSessionActiveForRepo(repoPath string) bool {
 	repoPath = m.normalizeRepoPath(repoPath)
 	if repoPath == "" || m.piProc == nil || !m.piProc.Running() {
@@ -2544,6 +2615,16 @@ func (m *model) updatePIKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	rawKey := msg.String()
+	if keyMatchesShortcut(msg, "ctrl+d") {
+		m.piui.HalfPageDown()
+		m.refreshAgentViewport()
+		return m, nil
+	}
+	if keyMatchesShortcut(msg, "ctrl+u") {
+		m.piui.HalfPageUp()
+		m.refreshAgentViewport()
+		return m, nil
+	}
 	switch {
 	case keyMatchesShortcut(msg, "ctrl+c"):
 		return m, m.quitCmd()
@@ -2554,6 +2635,26 @@ func (m *model) updatePIKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch rawKey {
+	case "up":
+		m.piui.ScrollUp()
+		m.refreshAgentViewport()
+		return m, nil
+	case "down":
+		m.piui.ScrollDown()
+		m.refreshAgentViewport()
+		return m, nil
+	case "pgup":
+		m.piui.HalfPageUp()
+		m.refreshAgentViewport()
+		return m, nil
+	case "pgdown":
+		m.piui.HalfPageDown()
+		m.refreshAgentViewport()
+		return m, nil
+	case "end":
+		m.piui.GotoBottom()
+		m.refreshAgentViewport()
+		return m, nil
 	case "ctrl+e":
 		m.piui.ToggleToolBody()
 		m.refreshAgentViewport()
@@ -2885,7 +2986,7 @@ func (m *model) appendSlashResponse(cmd string, msg pi.PiResponseMsg) {
 	case "/state":
 		text = formatStateText(msg.Data)
 	case "/stats":
-		text = formatStatsText(msg.Data)
+		text = formatStatsText(msg.Data, m.piui.ThinkingLevel)
 	case "/commands":
 		text = formatCommandsText(msg.Data)
 	default:
@@ -3061,14 +3162,34 @@ func formatStateText(data map[string]any) string {
 	return strings.Join(parts, "\n")
 }
 
-func formatStatsText(data map[string]any) string {
+func formatStatsText(data map[string]any, thinkingLevel string) string {
 	if data == nil {
 		return "No stats available."
 	}
 	parts := []string{"Session stats:"}
 	if tokens, ok := data["tokens"].(map[string]any); ok {
-		if total, ok := tokens["total"].(float64); ok {
-			parts = append(parts, fmt.Sprintf("- tokens: %d", int(total)))
+		input := tokenInt(tokens["input"])
+		output := tokenInt(tokens["output"])
+		reasoning := tokenInt(tokens["reasoning"])
+		if reasoning == 0 {
+			reasoning = tokenInt(tokens["reasoningTokens"])
+		}
+		raw := tokenInt(tokens["total"])
+		if raw <= 0 {
+			raw = input + output + reasoning
+		}
+		adjusted := input + output + int(float64(reasoning)*thinkingWeight(thinkingLevel)+0.5)
+		if adjusted <= 0 {
+			adjusted = raw
+		}
+		if adjusted > 0 {
+			parts = append(parts, fmt.Sprintf("- tokens (adjusted): %d", adjusted))
+		}
+		if raw > 0 {
+			parts = append(parts, fmt.Sprintf("- tokens (raw): %d", raw))
+		}
+		if input > 0 || output > 0 || reasoning > 0 {
+			parts = append(parts, fmt.Sprintf("- breakdown: in %d, out %d, reasoning %d", input, output, reasoning))
 		}
 	}
 	if cost, ok := data["cost"].(float64); ok {
@@ -3078,6 +3199,37 @@ func formatStatsText(data map[string]any) string {
 		parts = append(parts, fmt.Sprintf("- tool calls: %d", int(toolCalls)))
 	}
 	return strings.Join(parts, "\n")
+}
+
+func tokenInt(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int32:
+		return int(n)
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case string:
+		if parsed, err := strconv.Atoi(strings.TrimSpace(n)); err == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
+func thinkingWeight(level string) float64 {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "low":
+		return 0.85
+	case "med", "medium":
+		return 1.00
+	case "high":
+		return 1.20
+	default:
+		return 1.00
+	}
 }
 
 func formatCommandsText(data map[string]any) string {
