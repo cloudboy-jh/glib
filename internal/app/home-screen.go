@@ -28,7 +28,7 @@ import (
 	"github.com/cloudboy-jh/glib/internal/workspace"
 )
 
-const version = "v0.3.5"
+const version = "v0.3.8"
 const useMockViews = false
 const defaultGitHubClientID = "Ov23lipqkO6lVZpjGTZJ"
 const githubAuthScope = "repo"
