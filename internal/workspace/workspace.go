@@ -43,25 +43,34 @@ func (m *Manager) SetKind(kind Kind) {
 	m.Kind = kind
 }
 
-func (m *Manager) RepoExists(fullName string) bool {
-	safeName := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(fullName)), "/", "__")
-	if safeName == "" {
-		return false
+func (m *Manager) safeName(fullName string) string {
+	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(fullName)), "/", "__")
+}
+
+// RepoPath returns the on-disk path for a local copy of the repo, or empty string if not present.
+func (m *Manager) RepoPath(fullName string) string {
+	safe := m.safeName(fullName)
+	if safe == "" {
+		return ""
 	}
-	repoRoot := filepath.Join(m.Root, safeName)
+	repoRoot := filepath.Join(m.Root, safe)
 	if git.IsGitRepo(repoRoot) {
-		return true
+		return repoRoot
 	}
 	if git.IsGitRepo(filepath.Join(repoRoot, "main")) {
-		return true
+		return filepath.Join(repoRoot, "main")
 	}
 	if git.IsGitRepo(filepath.Join(repoRoot, "base")) {
-		return true
+		return filepath.Join(repoRoot, "base")
 	}
-	if existing := strings.TrimSpace(m.ephemeral[safeName]); existing != "" && git.IsGitRepo(existing) {
-		return true
+	if existing := strings.TrimSpace(m.ephemeral[safe]); existing != "" && git.IsGitRepo(existing) {
+		return existing
 	}
-	return false
+	return ""
+}
+
+func (m *Manager) RepoExists(fullName string) bool {
+	return m.RepoPath(fullName) != ""
 }
 
 func (m *Manager) EnsureRepo(fullName, cloneURL string) (string, error) {

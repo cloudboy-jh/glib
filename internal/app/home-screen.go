@@ -28,7 +28,7 @@ import (
 	"github.com/cloudboy-jh/glib/internal/workspace"
 )
 
-const version = "v0.3.4"
+const version = "v0.3.5"
 const useMockViews = false
 const defaultGitHubClientID = "Ov23lipqkO6lVZpjGTZJ"
 const githubAuthScope = "repo"
@@ -56,6 +56,13 @@ const (
 	pickerLocal pickerMode = "LOCAL"
 	pickerClone pickerMode = "CLONE"
 	pickerRepos pickerMode = "REPOS"
+)
+
+type projectsViewMode string
+
+const (
+	projectsViewRecent     projectsViewMode = "recent"
+	projectsViewAllOverlay projectsViewMode = "all_overlay"
 )
 
 type diffViewMode string
@@ -174,10 +181,40 @@ type workspaceCleanupMsg struct {
 	Result workspace.CleanupResult
 }
 
+type repoStaleInfo struct {
+	Behind    int
+	LastFetch time.Time
+}
+
+type repoStaleMsg struct {
+	FullName  string
+	Behind    int
+	LastFetch time.Time
+	Err       error
+}
+
 type localTreeRow struct {
 	Path  string
 	IsDir bool
 	Label string
+}
+
+type recentRowKind int
+
+const (
+	recentRowRepo recentRowKind = iota
+	recentRowCTA
+)
+
+type recentRepoRef struct {
+	Repo      githubauth.Repo
+	LocalOnly bool
+	LocalPath string
+}
+
+type recentRow struct {
+	Kind recentRowKind
+	Repo recentRepoRef
 }
 
 type modelPickerItem struct {
@@ -216,7 +253,6 @@ type model struct {
 	projectPath      string
 	activeRepoName   string
 	pendingRepoName  string
-	recent           []string
 	lastRepo         string
 	statusMessage    string
 	errorText        string
@@ -257,6 +293,8 @@ type model struct {
 	repoFilter       string
 	repoActionOpen   bool
 	repoActionCursor int
+	projectsView     projectsViewMode
+	recentCursor     int
 	pendingLaunch    string
 	workspace        *workspace.Manager
 	workspaceKind    workspace.Kind
@@ -267,6 +305,7 @@ type model struct {
 	authPollDeadline time.Time
 	authPollInterval int
 	gitView          gitViewMode
+	repoStale        map[string]repoStaleInfo
 	gitBranches      []string
 	gitCurrentBranch string
 	gitBranchCursor  int
@@ -330,8 +369,10 @@ func NewModel() *model {
 		authStatus:    githubauth.StatusSignedOut,
 		authClientID:  resolveGitHubClientID(),
 		repoPage:      1,
+		projectsView:  projectsViewRecent,
 		workspaceKind: workspace.KindLocal,
 		pendingSlash:  map[string]string{},
+		repoStale:     map[string]repoStaleInfo{},
 		settings:      settings,
 	}
 	if settingsErr != nil {
@@ -527,6 +568,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rebindProjectPath(msg.ProjectPath)
 		if strings.TrimSpace(m.pendingRepoName) != "" {
 			m.activeRepoName = strings.TrimSpace(m.pendingRepoName)
+			if repo, ok := m.repoByFullName(m.activeRepoName); ok {
+				_ = m.settings.PushRecentGitHub(repo)
+			}
 			m.pendingRepoName = ""
 		} else {
 			m.activeRepoName = inferRepoNameFromPath(m.projectPath)
@@ -667,6 +711,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.picker = pickerRepos
 		if !msg.Append {
 			m.statusMessage = "pick a repo and press enter to get started"
+		}
+		if m.projectsView == projectsViewRecent {
+			if row, ok := m.selectedRecentRow(); ok && row.Kind == recentRowRepo {
+				if row.Repo.LocalOnly {
+					return m, m.checkRepoPathStaleCmd(row.Repo.LocalPath, row.Repo.Repo.FullName)
+				}
+				return m, m.checkRepoStaleCmd(row.Repo.Repo.FullName)
+			}
+			return m, nil
+		}
+		if repo, ok := m.repoAtCursor(); ok {
+			return m, m.checkRepoStaleCmd(repo.FullName)
 		}
 		return m, nil
 
@@ -825,6 +881,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case repoStaleMsg:
+		if msg.Err != nil {
+			m.statusMessage = "fetch failed: " + msg.Err.Error()
+			return m, nil
+		}
+		m.repoStale[msg.FullName] = repoStaleInfo{Behind: msg.Behind, LastFetch: msg.LastFetch}
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.prompt != promptNone {
 			return m, m.updatePrompt(msg)
@@ -905,6 +969,129 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			if m.picker == pickerRepos {
+				if m.projectsView == projectsViewRecent {
+					if m.repoActionOpen {
+						switch msg.String() {
+						case "j", "down", "l", "right":
+							m.repoActionCursor = clamp(m.repoActionCursor+1, 0, 2)
+							return m, nil
+						case "k", "up", "h", "left":
+							m.repoActionCursor = clamp(m.repoActionCursor-1, 0, 2)
+							return m, nil
+						case "esc":
+							m.repoActionOpen = false
+							return m, nil
+						case "enter":
+							row, ok := m.selectedRecentRow()
+							if !ok || row.Kind != recentRowRepo {
+								return m, nil
+							}
+							if row.Repo.LocalOnly {
+								switch m.repoActionCursor {
+								case 0:
+									m.mode = modeDiff
+									m.diffView = diffViewHistory
+									m.repoActionOpen = false
+									m.rebindProjectPath(row.Repo.LocalPath)
+									m.activeRepoName = row.Repo.Repo.FullName
+									return m, m.loadDiffHistoryCmd()
+								case 1:
+									m.mode = modeGit
+									m.gitView = gitViewStatus
+									m.repoActionOpen = false
+									m.rebindProjectPath(row.Repo.LocalPath)
+									m.activeRepoName = row.Repo.Repo.FullName
+									return m, m.refreshGitCmd()
+								default:
+									m.mode = modePI
+									m.repoActionOpen = false
+									m.rebindProjectPath(row.Repo.LocalPath)
+									m.activeRepoName = row.Repo.Repo.FullName
+									if m.piSessionActiveForRepo(m.projectPath) {
+										return m, nil
+									}
+									return m, m.startPiCmd()
+								}
+							}
+							repo := row.Repo.Repo
+							m.lastRepo = repo.FullName
+							m.pendingRepoName = repo.FullName
+							switch m.repoActionCursor {
+							case 0:
+								m.pendingLaunch = "diff"
+								m.statusMessage = "opening diff for " + repo.FullName
+							case 1:
+								m.pendingLaunch = "git"
+								m.statusMessage = "opening git for " + repo.FullName
+							default:
+								m.pendingLaunch = "pi"
+								m.statusMessage = "opening pi for " + repo.FullName
+							}
+							return m, m.openRepoCmd(repo)
+						}
+					}
+
+					switch msg.String() {
+					case "j", "down":
+						rows := m.recentRows()
+						m.recentCursor = clamp(m.recentCursor+1, 0, max(0, len(rows)-1))
+						if row, ok := m.selectedRecentRow(); ok && row.Kind == recentRowRepo {
+							if row.Repo.LocalOnly {
+								return m, m.checkRepoPathStaleCmd(row.Repo.LocalPath, row.Repo.Repo.FullName)
+							}
+							return m, m.checkRepoStaleCmd(row.Repo.Repo.FullName)
+						}
+						return m, nil
+					case "k", "up":
+						rows := m.recentRows()
+						m.recentCursor = clamp(m.recentCursor-1, 0, max(0, len(rows)-1))
+						if row, ok := m.selectedRecentRow(); ok && row.Kind == recentRowRepo {
+							if row.Repo.LocalOnly {
+								return m, m.checkRepoPathStaleCmd(row.Repo.LocalPath, row.Repo.Repo.FullName)
+							}
+							return m, m.checkRepoStaleCmd(row.Repo.Repo.FullName)
+						}
+						return m, nil
+					case "r":
+						m.projectsView = projectsViewAllOverlay
+						return m, nil
+					case "F":
+						row, ok := m.selectedRecentRow()
+						if !ok || row.Kind != recentRowRepo {
+							return m, nil
+						}
+						if row.Repo.LocalOnly {
+							return m, m.fetchRepoPathCmd(row.Repo.LocalPath, row.Repo.Repo.FullName)
+						}
+						if m.workspace == nil || !m.workspace.RepoExists(row.Repo.Repo.FullName) {
+							return m, nil
+						}
+						return m, m.fetchRepoCmd(row.Repo.Repo)
+					case "enter":
+						row, ok := m.selectedRecentRow()
+						if !ok {
+							return m, nil
+						}
+						if row.Kind == recentRowCTA {
+							m.projectsView = projectsViewAllOverlay
+							return m, nil
+						}
+						if row.Repo.LocalOnly {
+							m.pendingRepoName = row.Repo.Repo.FullName
+							m.rebindProjectPath(row.Repo.LocalPath)
+							m.activeRepoName = row.Repo.Repo.FullName
+							m.repoActionOpen = true
+							m.repoActionCursor = 0
+							return m, nil
+						}
+						m.pendingRepoName = row.Repo.Repo.FullName
+						m.repoActionOpen = true
+						m.repoActionCursor = 0
+						return m, nil
+					}
+					return m, nil
+				}
+
 				if m.repoActionOpen {
 					switch msg.String() {
 					case "j", "down", "l", "right":
@@ -917,6 +1104,54 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.repoActionOpen = false
 						return m, nil
 					case "enter":
+						if m.projectsView == projectsViewRecent {
+							row, ok := m.selectedRecentRow()
+							if !ok || row.Kind != recentRowRepo {
+								return m, nil
+							}
+							if row.Repo.LocalOnly {
+								switch m.repoActionCursor {
+								case 0:
+									m.mode = modeDiff
+									m.diffView = diffViewHistory
+									m.repoActionOpen = false
+									m.rebindProjectPath(row.Repo.LocalPath)
+									m.activeRepoName = row.Repo.Repo.FullName
+									return m, m.loadDiffHistoryCmd()
+								case 1:
+									m.mode = modeGit
+									m.gitView = gitViewStatus
+									m.repoActionOpen = false
+									m.rebindProjectPath(row.Repo.LocalPath)
+									m.activeRepoName = row.Repo.Repo.FullName
+									return m, m.refreshGitCmd()
+								default:
+									m.mode = modePI
+									m.repoActionOpen = false
+									m.rebindProjectPath(row.Repo.LocalPath)
+									m.activeRepoName = row.Repo.Repo.FullName
+									if m.piSessionActiveForRepo(m.projectPath) {
+										return m, nil
+									}
+									return m, m.startPiCmd()
+								}
+							}
+							repo := row.Repo.Repo
+							m.lastRepo = repo.FullName
+							m.pendingRepoName = repo.FullName
+							switch m.repoActionCursor {
+							case 0:
+								m.pendingLaunch = "diff"
+								m.statusMessage = "opening diff for " + repo.FullName
+							case 1:
+								m.pendingLaunch = "git"
+								m.statusMessage = "opening git for " + repo.FullName
+							default:
+								m.pendingLaunch = "pi"
+								m.statusMessage = "opening pi for " + repo.FullName
+							}
+							return m, m.openRepoCmd(repo)
+						}
 						repo, ok := m.selectedRepo()
 						if !ok {
 							return m, nil
@@ -942,12 +1177,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				switch msg.String() {
 				case "j", "down":
 					m.repoCursor = clamp(m.repoCursor+1, 0, max(0, m.repoDisplayLen()-1))
+					cmds := []tea.Cmd{}
 					if m.shouldFetchMoreRepos() {
-						return m, m.loadReposPageCmd(m.repoPage+1, true)
+						cmds = append(cmds, m.loadReposPageCmd(m.repoPage+1, true))
 					}
-					return m, nil
+					if repo, ok := m.repoAtCursor(); ok {
+						cmds = append(cmds, m.checkRepoStaleCmd(repo.FullName))
+					}
+					return m, tea.Batch(cmds...)
 				case "k", "up":
 					m.repoCursor = clamp(m.repoCursor-1, 0, max(0, m.repoDisplayLen()-1))
+					if repo, ok := m.repoAtCursor(); ok {
+						return m, m.checkRepoStaleCmd(repo.FullName)
+					}
 					return m, nil
 				case "backspace":
 					if m.repoFilter != "" {
@@ -960,6 +1202,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if m.repoFilter != "" {
 						m.repoFilter = ""
 						m.repoCursor = clamp(m.repoCursor, 0, max(0, m.repoDisplayLen()-1))
+						return m, nil
+					}
+					if m.projectsView == projectsViewAllOverlay {
+						m.projectsView = projectsViewRecent
 						return m, nil
 					}
 				case "n":
@@ -980,6 +1226,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.statusMessage = "backend: " + string(m.workspaceKind)
 					return m, nil
+				case "F":
+					repo, ok := m.selectedRepo()
+					if !ok || m.workspace == nil || !m.workspace.RepoExists(repo.FullName) {
+						return m, nil
+					}
+					m.statusMessage = "fetching " + repo.FullName
+					return m, m.fetchRepoCmd(repo)
 				case "enter":
 					if m.repoDisplayLen() == 0 {
 						return m, nil
@@ -1276,6 +1529,25 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *model) queueRepoLaunch(launch string) (tea.Cmd, bool) {
 	if m.mode != modeProjects || m.picker != pickerRepos {
 		return nil, false
+	}
+	if m.projectsView == projectsViewRecent {
+		row, ok := m.selectedRecentRow()
+		if !ok || row.Kind != recentRowRepo {
+			return nil, false
+		}
+		if row.Repo.LocalOnly {
+			m.rebindProjectPath(row.Repo.LocalPath)
+			m.activeRepoName = row.Repo.Repo.FullName
+			return nil, false
+		}
+		repo := row.Repo.Repo
+		if m.activeRepoName == repo.FullName && strings.TrimSpace(m.projectPath) != "" && git.IsGitRepo(m.projectPath) {
+			return nil, false
+		}
+		m.pendingLaunch = launch
+		m.pendingRepoName = repo.FullName
+		m.statusMessage = "opening " + launch + " for " + repo.FullName
+		return m.openRepoCmd(repo), true
 	}
 	repo, ok := m.selectedRepo()
 	if !ok {
@@ -1893,6 +2165,78 @@ func (m *model) loadReposPageCmd(page int, appendPage bool) tea.Cmd {
 	}
 }
 
+func (m *model) checkRepoStaleCmd(fullName string) tea.Cmd {
+	if m.workspace == nil {
+		return nil
+	}
+	path := m.workspace.RepoPath(fullName)
+	if path == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		behind := 0
+		if out, _, err := git.RunGit(path, "rev-list", "--count", "HEAD..@{upstream}"); err == nil {
+			behind, _ = strconv.Atoi(strings.TrimSpace(out))
+		}
+		lastFetch, _ := git.LastFetch(path)
+		return repoStaleMsg{FullName: fullName, Behind: behind, LastFetch: lastFetch}
+	}
+}
+
+func (m *model) checkRepoPathStaleCmd(path, label string) tea.Cmd {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		behind := 0
+		if out, _, err := git.RunGit(path, "rev-list", "--count", "HEAD..@{upstream}"); err == nil {
+			behind, _ = strconv.Atoi(strings.TrimSpace(out))
+		}
+		lastFetch, _ := git.LastFetch(path)
+		return repoStaleMsg{FullName: label, Behind: behind, LastFetch: lastFetch}
+	}
+}
+
+func (m *model) fetchRepoCmd(repo githubauth.Repo) tea.Cmd {
+	if m.workspace == nil {
+		return nil
+	}
+	path := m.workspace.RepoPath(repo.FullName)
+	if path == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		if _, _, err := git.RunGit(path, "fetch", "--all", "--prune"); err != nil {
+			return repoStaleMsg{FullName: repo.FullName, Err: err}
+		}
+		behind := 0
+		if out, _, err := git.RunGit(path, "rev-list", "--count", "HEAD..@{upstream}"); err == nil {
+			behind, _ = strconv.Atoi(strings.TrimSpace(out))
+		}
+		lastFetch, _ := git.LastFetch(path)
+		return repoStaleMsg{FullName: repo.FullName, Behind: behind, LastFetch: lastFetch}
+	}
+}
+
+func (m *model) fetchRepoPathCmd(path, label string) tea.Cmd {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		if _, _, err := git.RunGit(path, "fetch", "--all", "--prune"); err != nil {
+			return repoStaleMsg{FullName: label, Err: err}
+		}
+		behind := 0
+		if out, _, err := git.RunGit(path, "rev-list", "--count", "HEAD..@{upstream}"); err == nil {
+			behind, _ = strconv.Atoi(strings.TrimSpace(out))
+		}
+		lastFetch, _ := git.LastFetch(path)
+		return repoStaleMsg{FullName: label, Behind: behind, LastFetch: lastFetch}
+	}
+}
+
 func (m *model) filteredRepos() []githubauth.Repo {
 	query := strings.TrimSpace(m.repoFilter)
 	if query == "" {
@@ -1936,6 +2280,68 @@ func (m *model) shouldFetchMoreRepos() bool {
 
 func (m *model) selectedRepo() (githubauth.Repo, bool) {
 	return m.repoAtCursor()
+}
+
+func (m *model) recentRows() []recentRow {
+	rows := make([]recentRow, 0, 12)
+	seen := map[string]struct{}{}
+	for _, rec := range m.settings.RecentGitHub() {
+		full := strings.TrimSpace(rec.FullName)
+		if full == "" {
+			continue
+		}
+		if _, ok := seen[full]; ok {
+			continue
+		}
+		seen[full] = struct{}{}
+		repo, ok := m.repoByFullName(full)
+		if !ok {
+			repo = githubauth.Repo{FullName: full, Name: inferRepoNameFromPath(full), CloneURL: strings.TrimSpace(rec.CloneURL), Private: rec.Private}
+		}
+		rows = append(rows, recentRow{Kind: recentRowRepo, Repo: recentRepoRef{Repo: repo}})
+		if len(rows) >= 5 {
+			break
+		}
+	}
+
+	localCount := 0
+	for _, p := range m.settings.RecentLocal() {
+		path := strings.TrimSpace(p)
+		if path == "" || !git.IsGitRepo(path) {
+			continue
+		}
+		full := inferRepoNameFromPath(path)
+		if _, ok := seen[full]; ok {
+			continue
+		}
+		rows = append(rows, recentRow{Kind: recentRowRepo, Repo: recentRepoRef{LocalOnly: true, LocalPath: path, Repo: githubauth.Repo{FullName: full, Name: inferRepoNameFromPath(path)}}})
+		localCount++
+		if localCount >= 5 {
+			break
+		}
+	}
+
+	rows = append(rows, recentRow{Kind: recentRowCTA})
+	return rows
+}
+
+func (m *model) selectedRecentRow() (recentRow, bool) {
+	rows := m.recentRows()
+	if len(rows) == 0 {
+		return recentRow{}, false
+	}
+	idx := clamp(m.recentCursor, 0, len(rows)-1)
+	return rows[idx], true
+}
+
+func (m *model) repoByFullName(fullName string) (githubauth.Repo, bool) {
+	fullName = strings.TrimSpace(fullName)
+	for _, repo := range m.repos {
+		if strings.TrimSpace(repo.FullName) == fullName {
+			return repo, true
+		}
+	}
+	return githubauth.Repo{}, false
 }
 
 func (m *model) openRepoCmd(repo githubauth.Repo) tea.Cmd {
@@ -3347,16 +3753,7 @@ func (m *model) addRecent(path string) {
 	if path == "" {
 		return
 	}
-	next := []string{path}
-	for _, p := range m.recent {
-		if p != path {
-			next = append(next, p)
-		}
-		if len(next) >= 6 {
-			break
-		}
-	}
-	m.recent = next
+	_ = m.settings.PushRecentLocal(path)
 }
 
 func (m *model) currentRepoLabel() string {

@@ -78,6 +78,7 @@ func Refresh(dir string) (GitState, error) {
 		return GitState{}, err
 	}
 	addedTotal, deletedTotal := aggregateTotals(stats)
+	lastFetch, _ := LastFetch(dir)
 
 	return GitState{
 		Branch:       branch,
@@ -93,7 +94,50 @@ func Refresh(dir string) (GitState, error) {
 		AddedTotal:   addedTotal,
 		DeletedTotal: deletedTotal,
 		LastCommit:   lastCommit,
+		LastFetch:    lastFetch,
 	}, nil
+}
+
+// LastFetch returns the best available proxy for the last fetch/pull time.
+// It tries .git/FETCH_HEAD, then loose refs under .git/refs/remotes/, then .git/packed-refs.
+func LastFetch(dir string) (time.Time, error) {
+	gitDir := filepath.Join(dir, ".git")
+	if fi, err := os.Stat(gitDir); err != nil || !fi.IsDir() {
+		// .git might be a gitdir file (worktree); resolve real path
+		if common, _, err := RunGit(dir, "rev-parse", "--git-common-dir"); err == nil {
+			gitDir = filepath.Clean(filepath.Join(dir, strings.TrimSpace(common)))
+		}
+	}
+
+	candidates := []string{filepath.Join(gitDir, "FETCH_HEAD")}
+	if entries, err := os.ReadDir(filepath.Join(gitDir, "refs", "remotes")); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				sub, _ := os.ReadDir(filepath.Join(gitDir, "refs", "remotes", e.Name()))
+				for _, se := range sub {
+					if !se.IsDir() {
+						candidates = append(candidates, filepath.Join(gitDir, "refs", "remotes", e.Name(), se.Name()))
+					}
+				}
+			}
+		}
+	}
+	candidates = append(candidates, filepath.Join(gitDir, "packed-refs"))
+
+	var best time.Time
+	for _, p := range candidates {
+		st, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		if best.IsZero() || st.ModTime().After(best) {
+			best = st.ModTime()
+		}
+	}
+	if best.IsZero() {
+		return time.Time{}, fmt.Errorf("no fetch timestamp available")
+	}
+	return best, nil
 }
 
 func StageFile(dir, path string) error {

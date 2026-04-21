@@ -36,7 +36,12 @@ func RenderStatusView(state GitState, width, height int, t theme.Theme) string {
 			fmt.Sprintf("%s%d", ic.Behind, state.Behind))
 	}
 
-	headerLine := branchIcon + " " + branchName + trackLine + syncStr
+	fetchStr := ""
+	if !state.LastFetch.IsZero() {
+		fetchStr = "  " + lipgloss.NewStyle().Foreground(t.TextMuted()).Render("fetched "+RelativeTime(state.LastFetch))
+	}
+
+	headerLine := branchIcon + " " + branchName + trackLine + syncStr + fetchStr
 	summaryLine := lipgloss.NewStyle().Foreground(t.TextMuted()).Render(
 		fmt.Sprintf("%d changed  %d staged  +%d -%d",
 			state.ChangedTotal, state.StagedTotal, state.AddedTotal, state.DeletedTotal),

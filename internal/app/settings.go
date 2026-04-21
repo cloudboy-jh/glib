@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/cloudboy-jh/glib/internal/config"
+	"github.com/cloudboy-jh/glib/internal/githubauth"
 )
 
 type settingsModel struct {
@@ -66,5 +67,67 @@ func (s *settingsModel) SetModel(provider, modelID string) error {
 	s.values.Model = modelID
 	s.values.ModelID = modelID
 	s.values.ModelProvider = provider
+	return config.SaveSettings(s.values)
+}
+
+func (s *settingsModel) RecentGitHub() []config.RecentGitHubRepo {
+	if s == nil {
+		return nil
+	}
+	out := make([]config.RecentGitHubRepo, 0, len(s.values.RecentGitHub))
+	out = append(out, s.values.RecentGitHub...)
+	return out
+}
+
+func (s *settingsModel) RecentLocal() []string {
+	if s == nil {
+		return nil
+	}
+	out := make([]string, 0, len(s.values.RecentLocal))
+	out = append(out, s.values.RecentLocal...)
+	return out
+}
+
+func (s *settingsModel) PushRecentGitHub(repo githubauth.Repo) error {
+	if s == nil {
+		return nil
+	}
+	full := strings.TrimSpace(repo.FullName)
+	if full == "" {
+		return nil
+	}
+	next := []config.RecentGitHubRepo{{FullName: full, CloneURL: strings.TrimSpace(repo.CloneURL), Private: repo.Private}}
+	for _, r := range s.values.RecentGitHub {
+		if strings.TrimSpace(r.FullName) == full {
+			continue
+		}
+		next = append(next, r)
+		if len(next) >= 20 {
+			break
+		}
+	}
+	s.values.RecentGitHub = next
+	return config.SaveSettings(s.values)
+}
+
+func (s *settingsModel) PushRecentLocal(path string) error {
+	if s == nil {
+		return nil
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	next := []string{path}
+	for _, p := range s.values.RecentLocal {
+		if strings.TrimSpace(p) == path {
+			continue
+		}
+		next = append(next, p)
+		if len(next) >= 20 {
+			break
+		}
+	}
+	s.values.RecentLocal = next
 	return config.SaveSettings(s.values)
 }

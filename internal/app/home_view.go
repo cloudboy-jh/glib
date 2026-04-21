@@ -69,7 +69,10 @@ func (m *model) View() tea.View {
 
 func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme, dim, bright lipgloss.Style) {
 	if m.authStatus == githubauth.StatusAuth && m.picker == pickerRepos {
-		m.drawRepoProjectsView(surf, bodyH, t, dim, bright)
+		m.drawRecentProjectsView(surf, bodyH, t, dim, bright)
+		if m.projectsView == projectsViewAllOverlay {
+			m.drawRepoOverlayView(surf, bodyH, t, dim, bright)
+		}
 		return
 	}
 
@@ -156,8 +159,9 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 			Foreground(t.Text()).
 			Render(inputVal)
 		recentStr := "no recent projects"
-		if len(m.recent) > 0 {
-			show := m.recent
+		recentItems := m.settings.RecentLocal()
+		if len(recentItems) > 0 {
+			show := recentItems
 			if len(show) > 3 {
 				show = show[:3]
 			}
@@ -264,9 +268,119 @@ var repoLoadingMessages = []string{
 	"almost there…",
 }
 
-func (m *model) drawRepoProjectsView(surf *surface.Surface, bodyH int, t theme.Theme, dim, bright lipgloss.Style) {
+func (m *model) drawRecentProjectsView(surf *surface.Surface, bodyH int, t theme.Theme, dim, bright lipgloss.Style) {
 	contentW := m.projectsContentWidth()
-	listH := clamp(bodyH/3, 6, 14)
+	rowW := max(8, contentW)
+	base := lipgloss.NewStyle().Background(t.BackgroundPanel()).Foreground(t.Text())
+	active := base.Copy().Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Bold(true)
+	muted := base.Copy().Foreground(t.TextMuted())
+	padRow := func(v string) string {
+		v = fitLine(v, rowW)
+		if lipgloss.Width(v) < rowW {
+			v += strings.Repeat(" ", rowW-lipgloss.Width(v))
+		}
+		return v
+	}
+
+	rows := m.recentRows()
+	lines := make([]string, 0, len(rows)+4)
+	if len(rows) == 0 {
+		lines = append(lines, muted.Render(padRow("No recent repositories yet.")))
+	}
+	for i, row := range rows {
+		style := base
+		prefix := "  "
+		if i == m.recentCursor {
+			style = active
+			prefix = "> "
+		}
+		if row.Kind == recentRowCTA {
+			lines = append(lines, style.Render(padRow(prefix+"View all repos…")))
+			continue
+		}
+		name := row.Repo.Repo.FullName
+		if row.Repo.LocalOnly {
+			name += "  [local-only]"
+			if stale, ok := m.repoStale[row.Repo.Repo.FullName]; ok && !stale.LastFetch.IsZero() {
+				name += "  [" + git.RelativeTime(stale.LastFetch) + "]"
+			}
+			lines = append(lines, style.Render(padRow(prefix+name)))
+			continue
+		}
+		if row.Repo.Repo.Private {
+			name += " (private)"
+		}
+		if m.workspace != nil {
+			if m.workspace.RepoExists(row.Repo.Repo.FullName) {
+				name += "  [local]"
+				if stale, ok := m.repoStale[row.Repo.Repo.FullName]; ok {
+					if stale.Behind > 0 {
+						name += fmt.Sprintf("  [behind %d]", stale.Behind)
+					}
+					if !stale.LastFetch.IsZero() {
+						name += "  [" + git.RelativeTime(stale.LastFetch) + "]"
+					}
+				}
+			} else {
+				name += "  [clone needed]"
+			}
+		}
+		lines = append(lines, style.Render(padRow(prefix+name)))
+	}
+
+	wm := lipgloss.NewStyle().Foreground(t.TextAccent()).Bold(true).Render(glibWordmark)
+	header := lipgloss.NewStyle().Foreground(t.TextAccent()).Bold(true).Render(m.icons.Projects + "  Recent Repositories")
+	meta := lipgloss.NewStyle().Foreground(t.TextMuted()).Render("up to 5 github recents + up to 5 local-only")
+	content := lipgloss.JoinVertical(lipgloss.Left, header, meta, "", strings.Join(lines, "\n"))
+	block := lipgloss.NewStyle().
+		Background(t.BackgroundPanel()).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.BorderFocus()).
+		Padding(0, 1).
+		Width(contentW).
+		Render(content)
+
+	wmW := lipgloss.Width(wm)
+	wmH := lipgloss.Height(wm)
+	blockW := lipgloss.Width(block)
+	blockH := lipgloss.Height(block)
+	actionKbd := dim.Render("move ") + bright.Render("j/k") + dim.Render("  open ") + bright.Render("enter") + dim.Render("  fetch ") + bright.Render("F") + dim.Render("  all repos ") + bright.Render("r")
+	actionBar := ""
+	if m.repoActionOpen {
+		item := func(label string, active bool) string {
+			st := lipgloss.NewStyle().Padding(0, 1).Foreground(t.Text())
+			if active {
+				st = st.Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Bold(true)
+			}
+			return st.Render(label)
+		}
+		diffItem := item(fmt.Sprintf("%s Diff — review changes", m.icons.Diff), m.repoActionCursor == 0)
+		gitItem := item(fmt.Sprintf("%s Git — stage & commit", m.icons.Git), m.repoActionCursor == 1)
+		piItem := item(fmt.Sprintf("%s Pi — AI agent", m.icons.PI), m.repoActionCursor == 2)
+		barLine := diffItem + "   " + gitItem + "   " + piItem
+		actionBar = lipgloss.NewStyle().Background(t.BackgroundPanel()).Foreground(t.Text()).Padding(0, 1).Render(barLine)
+		actionKbd = dim.Render("choose ") + bright.Render("h/l or arrows") + dim.Render("  run ") + bright.Render("enter") + dim.Render("  back ") + bright.Render("esc")
+	}
+
+	stackH := wmH + 1 + blockH + 1 + 1
+	if actionBar != "" {
+		stackH += lipgloss.Height(actionBar) + 1
+	}
+	y := max(0, (bodyH-stackH)/2)
+	surf.Draw(max(0, (m.width-wmW)/2), y, wm)
+	y += wmH + 1
+	surf.Draw(max(0, (m.width-blockW)/2), y, block)
+	y += blockH + 1
+	if actionBar != "" {
+		surf.Draw(max(0, (m.width-lipgloss.Width(actionBar))/2), y, actionBar)
+		y += lipgloss.Height(actionBar) + 1
+	}
+	surf.Draw(max(0, (m.width-lipgloss.Width(actionKbd))/2), y, actionKbd)
+}
+
+func (m *model) drawRepoOverlayView(surf *surface.Surface, bodyH int, t theme.Theme, dim, bright lipgloss.Style) {
+	contentW := clamp(m.width*70/100, 56, max(56, m.width-8))
+	listH := clamp(bodyH/2, 8, 18)
 	rowW := max(8, contentW)
 	base := lipgloss.NewStyle().Background(t.BackgroundPanel()).Foreground(t.Text())
 	active := base.Copy().Background(t.BackgroundInteractive()).Foreground(t.TextInverse()).Bold(true)
@@ -317,6 +431,14 @@ func (m *model) drawRepoProjectsView(surf *surface.Surface, bodyH int, t theme.T
 			if m.workspace != nil {
 				if m.workspace.RepoExists(repo.FullName) {
 					name += "  [local]"
+					if stale, ok := m.repoStale[repo.FullName]; ok {
+						if stale.Behind > 0 {
+							name += fmt.Sprintf("  [behind %d]", stale.Behind)
+						}
+						if !stale.LastFetch.IsZero() {
+							name += "  [" + git.RelativeTime(stale.LastFetch) + "]"
+						}
+					}
 				} else {
 					name += "  [clone needed]"
 				}
@@ -349,14 +471,8 @@ func (m *model) drawRepoProjectsView(surf *surface.Surface, bodyH int, t theme.T
 		Render(content)
 	blockW := lipgloss.Width(block)
 	blockH := lipgloss.Height(block)
-	wm := lipgloss.NewStyle().
-		Foreground(t.TextAccent()).
-		Bold(true).
-		Render(glibWordmark)
-	wmW := lipgloss.Width(wm)
-	wmH := lipgloss.Height(wm)
 
-	actionKbd := dim.Render("move ") + bright.Render("j/k") + dim.Render("  filter ") + bright.Render("type/backspace") + dim.Render("  actions ") + bright.Render("enter") + dim.Render("  backend ") + bright.Render("b") + dim.Render("  refresh ") + bright.Render("r")
+	actionKbd := dim.Render("move ") + bright.Render("j/k") + dim.Render("  filter ") + bright.Render("type/backspace") + dim.Render("  actions ") + bright.Render("enter") + dim.Render("  backend ") + bright.Render("b") + dim.Render("  refresh ") + bright.Render("r") + dim.Render("  fetch ") + bright.Render("F")
 	actionBar := ""
 	if m.repoActionOpen {
 		item := func(label string, active bool) string {
@@ -382,7 +498,7 @@ func (m *model) drawRepoProjectsView(surf *surface.Surface, bodyH int, t theme.T
 		actionKbd = dim.Render("choose ") + bright.Render("h/l or arrows") + dim.Render("  run ") + bright.Render("enter") + dim.Render("  back ") + bright.Render("esc")
 	}
 
-	stackH := wmH + 1 + blockH + 1 + 1
+	stackH := blockH + 1 + 1
 	if actionBar != "" {
 		stackH += lipgloss.Height(actionBar) + 1
 	}
@@ -390,8 +506,6 @@ func (m *model) drawRepoProjectsView(surf *surface.Surface, bodyH int, t theme.T
 	x := max(0, (m.width-blockW)/2)
 	y := stackY
 
-	surf.Draw(max(0, (m.width-wmW)/2), y, wm)
-	y += wmH + 1
 	surf.Draw(x, y, block)
 	y += blockH + 1
 
@@ -606,14 +720,17 @@ func (m *model) syncFooter() {
 
 	switch m.mode {
 	case modeProjects:
+		cfg.Position = version
 		if m.authStatus != githubauth.StatusAuth {
 			cfg.Context = m.icons.Projects + " enter sign in  q quit"
 			cfg.Scroll = strings.ToLower(m.authStatus)
 		} else if m.picker == pickerRepos {
 			if m.repoActionOpen {
 				cfg.Context = m.icons.Projects + " h/l choose  enter run  esc back"
+			} else if m.projectsView == projectsViewAllOverlay {
+				cfg.Context = m.icons.Projects + " j/k move  type filter  enter actions  esc close"
 			} else {
-				cfg.Context = m.icons.Projects + " j/k move  enter actions  esc back"
+				cfg.Context = m.icons.Projects + " j/k move  enter actions  F fetch  r all repos"
 			}
 			cfg.Position = ""
 			cfg.Scroll = string(m.workspaceKind)

@@ -60,6 +60,8 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 ## Projects Contract (`p`)
 
 - Source of truth is authenticated GitHub repo list.
+- Default PROJECTS surface is a recent-first hub (up to 5 GitHub recents + up to 5 local-only recents).
+- Full GitHub repo list is available as an in-view overlay from recent hub (`r` / CTA row).
 - Repo ordering follows GitHub ordering and supports owner/name filter input.
 - Navigation supports cursor movement and explicit refresh.
 - Repo list viewport scales with terminal height and supports pagination for large accounts.
@@ -76,6 +78,8 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 - Ephemeral cleanup runs on app quit and skips dirty worktrees.
 - Project selection sets active repository context for `GIT`, `DIFF`, and `PI`.
 - Repo rows show materialization state badges (`[local]` / `[clone needed]`).
+- Repo rows surface freshness badges where available (`[behind N]`, `[Xd ago]`).
+- `F` fetches selected local repo directly from PROJECTS (recent hub and full overlay).
 - Footer shows `● pi active  i resume` when PI session is live for selected repo.
 
 ## Distribution Contract

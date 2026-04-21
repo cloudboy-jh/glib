@@ -41,6 +41,7 @@ type GitState struct {
 	DeletedTotal int
 
 	LastCommit   CommitInfo
+	LastFetch    time.Time
 	LastAction   string
 	LoadedForDir string
 

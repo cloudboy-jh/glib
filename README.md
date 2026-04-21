@@ -95,7 +95,7 @@ By default, `glib` ships with a built-in GitHub OAuth client id so release users
 
 ## Modes
 
-- `PROJECTS` (`p`): GitHub repo list picker and workspace backend toggle.
+- `PROJECTS` (`p`): recent-first repo hub (GitHub + local-only recents), all-repos overlay, and workspace backend toggle.
 - `GIT` (`g`): staged/unstaged/untracked operations with commit/push actions, branch management, and stash operations.
 - `DIFF` (`d`): list-first commit history and embedded `bento-diffs` viewer with file/hunk navigation.
 - `PI` (`i`): pi RPC chat/runtime in selected project directory with slash commands and session persistence.
@@ -145,9 +145,10 @@ PROJECTS
 ### Projects
 - `j/k` or arrows — move
 - `enter` — open action chooser
+- `F` — fetch selected local repo
+- `r` — open full repos overlay / refresh in overlay
 - `b` — backend toggle (local/ephemeral)
 - `n` — new project
-- `r` — refresh repos
 - type / `backspace` — filter repos by owner/name
 - `tab` — toggle repo/local picker
 
@@ -239,6 +240,7 @@ PROJECTS
 - Quick user settings are persisted in `<user-config-dir>/glib/config.json`.
 - Theme selection is auto-saved and restored on next app launch.
 - Last selected PI model is saved and applied when PI starts.
+- Recent GitHub and local-only repositories are persisted for PROJECTS recent hub.
 
 ## Architecture Notes
 

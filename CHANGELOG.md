@@ -7,6 +7,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- No unreleased changes.
+
+## [0.3.5] - 2026-04-21
+
+### Added
+
+- **PROJECTS Recent Hub**: authenticated PROJECTS now defaults to a compact recent-first list (up to 5 GitHub recents + up to 5 local-only recents) with a dedicated "View all repos" row.
+- **All repos overlay**: full GitHub repository list now opens as an in-view overlay from Recent Hub (`r` / CTA row), preserving existing filter, pagination, and action chooser behavior.
+- **Repo freshness badges**: PROJECTS rows now include staleness context (`[behind N]`, `[Xd ago]`) sourced from local git state.
+- **In-place fetch from PROJECTS**: `F` fetches selected local repo directly from Recent Hub or full overlay.
+- **Persisted recent history**: user config now stores recent GitHub repos and recent local-only repos for startup continuity.
+- **Launch footer version stamp**: footer bottom-right now shows app version on launch/PROJECTS screen.
+
+### Changed
+
+- **Git freshness detection**: last-fetch timestamp resolution now falls back beyond `FETCH_HEAD` (remote refs / packed refs) so age badges render reliably across repo layouts and environments.
+
 ### Added
 
 - **Release distribution scaffolding**: added `.goreleaser.yml` with cross-platform `glib` binaries (darwin/linux/windows, amd64/arm64), archives, and checksums.
