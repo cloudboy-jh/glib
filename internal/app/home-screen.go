@@ -28,7 +28,7 @@ import (
 	"github.com/cloudboy-jh/glib/internal/workspace"
 )
 
-const version = "v0.3.8"
+const version = "v0.3.9"
 const useMockViews = false
 const defaultGitHubClientID = "Ov23lipqkO6lVZpjGTZJ"
 const githubAuthScope = "repo"
@@ -100,6 +100,9 @@ const (
 type gitRefreshMsg struct {
 	State  git.GitState
 	Action string
+	StaleLabel    string
+	StaleBehind   int
+	StaleLastFetch time.Time
 	Err    error
 }
 
@@ -190,6 +193,7 @@ type repoStaleMsg struct {
 	FullName  string
 	Behind    int
 	LastFetch time.Time
+	Action    string
 	Err       error
 }
 
@@ -315,6 +319,12 @@ type model struct {
 	gitLogCursor     int
 	settings         settingsModel
 	modelItems       []modelPickerItem
+	repoDisplayCache []githubauth.Repo
+	repoDisplayDirty bool
+	repoLocalCache   map[string]bool
+	repoLocalDirty   bool
+	recentRowsCache  []recentRow
+	recentRowsDirty  bool
 }
 
 func NewModel() *model {
@@ -373,6 +383,10 @@ func NewModel() *model {
 		workspaceKind: workspace.KindLocal,
 		pendingSlash:  map[string]string{},
 		repoStale:     map[string]repoStaleInfo{},
+		repoLocalCache: map[string]bool{},
+		repoDisplayDirty: true,
+		repoLocalDirty:   true,
+		recentRowsDirty:  true,
 		settings:      settings,
 	}
 	if settingsErr != nil {
@@ -476,6 +490,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.git.Cursor = clamp(m.git.Cursor, 0, len(rows)-1)
 		}
+		if strings.TrimSpace(msg.StaleLabel) != "" {
+			m.repoStale[strings.TrimSpace(msg.StaleLabel)] = repoStaleInfo{Behind: msg.StaleBehind, LastFetch: msg.StaleLastFetch}
+		}
 		return m, nil
 
 	case diffRefreshMsg:
@@ -566,10 +583,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.piPendingContext = ""
 		}
 		m.rebindProjectPath(msg.ProjectPath)
+		m.invalidateRepoLocalCache()
 		if strings.TrimSpace(m.pendingRepoName) != "" {
 			m.activeRepoName = strings.TrimSpace(m.pendingRepoName)
 			if repo, ok := m.repoByFullName(m.activeRepoName); ok {
 				_ = m.settings.PushRecentGitHub(repo)
+				m.invalidateRecentRowsCache()
 			}
 			m.pendingRepoName = ""
 		} else {
@@ -654,7 +673,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusMessage = "github auth complete"
 		m.repoPage = 1
 		m.repoHasMore = true
-		m.repoFilter = ""
+		m.setRepoFilter("")
+		m.invalidateRepoCaches()
 		return m, tea.Batch(m.persistTokenCmd(msg.Token), m.loadReposPageCmd(1, false))
 
 	case authPollTickMsg:
@@ -676,6 +696,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.repoPage = 1
 				m.repoHasMore = false
 				m.repos = nil
+				m.invalidateRepoCaches()
 				m.showError(msg.Err.Error())
 				return m, m.clearTokenCmd()
 			}
@@ -700,6 +721,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.repos = m.orderRepos(msg.Repos)
 			m.repoPage = max(1, msg.Page)
 		}
+		m.invalidateRepoCaches()
 		m.repoHasMore = len(msg.Repos) >= 100
 		if len(m.repos) == 0 {
 			m.repoCursor = 0
@@ -713,13 +735,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMessage = "pick a repo and press enter to get started"
 		}
 		if m.projectsView == projectsViewRecent {
-			if row, ok := m.selectedRecentRow(); ok && row.Kind == recentRowRepo {
-				if row.Repo.LocalOnly {
-					return m, m.checkRepoPathStaleCmd(row.Repo.LocalPath, row.Repo.Repo.FullName)
-				}
-				return m, m.checkRepoStaleCmd(row.Repo.Repo.FullName)
-			}
-			return m, nil
+			return m, m.refreshRecentStaleCmd()
 		}
 		if repo, ok := m.repoAtCursor(); ok {
 			return m, m.checkRepoStaleCmd(repo.FullName)
@@ -883,10 +899,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case repoStaleMsg:
 		if msg.Err != nil {
-			m.statusMessage = "fetch failed: " + msg.Err.Error()
+			if strings.TrimSpace(msg.Action) != "" {
+				m.statusMessage = strings.TrimSpace(msg.Action) + " failed: " + msg.Err.Error()
+			}
 			return m, nil
 		}
 		m.repoStale[msg.FullName] = repoStaleInfo{Behind: msg.Behind, LastFetch: msg.LastFetch}
+		if strings.TrimSpace(msg.Action) == "fetch" {
+			m.statusMessage = "fetched " + msg.FullName
+		} else if strings.TrimSpace(msg.Action) == "pull" {
+			m.statusMessage = "pulled " + msg.FullName
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -956,9 +979,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.authPollDeadline = time.Time{}
 					m.authPollInterval = 0
 					m.repos = nil
-					m.repoFilter = ""
+					m.setRepoFilter("")
 					m.repoPage = 1
 					m.repoHasMore = false
+					m.invalidateRepoCaches()
 					m.picker = pickerLocal
 					m.statusMessage = "github token cleared"
 					return m, m.clearTokenCmd()
@@ -1061,12 +1085,30 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							return m, nil
 						}
 						if row.Repo.LocalOnly {
+							m.statusMessage = "fetching " + row.Repo.Repo.FullName
 							return m, m.fetchRepoPathCmd(row.Repo.LocalPath, row.Repo.Repo.FullName)
 						}
-						if m.workspace == nil || !m.workspace.RepoExists(row.Repo.Repo.FullName) {
+						if !m.repoIsLocal(row.Repo.Repo.FullName) {
+							m.statusMessage = "repo not local — clone/open first"
 							return m, nil
 						}
+						m.statusMessage = "fetching " + row.Repo.Repo.FullName
 						return m, m.fetchRepoCmd(row.Repo.Repo)
+					case "P":
+						row, ok := m.selectedRecentRow()
+						if !ok || row.Kind != recentRowRepo {
+							return m, nil
+						}
+						if row.Repo.LocalOnly {
+							m.statusMessage = "pulling " + row.Repo.Repo.FullName
+							return m, m.pullRepoPathCmd(row.Repo.LocalPath, row.Repo.Repo.FullName)
+						}
+						if !m.repoIsLocal(row.Repo.Repo.FullName) {
+							m.statusMessage = "repo not local — clone/open first"
+							return m, nil
+						}
+						m.statusMessage = "pulling " + row.Repo.Repo.FullName
+						return m, m.pullRepoCmd(row.Repo.Repo)
 					case "enter":
 						row, ok := m.selectedRecentRow()
 						if !ok {
@@ -1194,13 +1236,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "backspace":
 					if m.repoFilter != "" {
 						r := []rune(m.repoFilter)
-						m.repoFilter = string(r[:len(r)-1])
+						m.setRepoFilter(string(r[:len(r)-1]))
 						m.repoCursor = clamp(m.repoCursor, 0, max(0, m.repoDisplayLen()-1))
 					}
 					return m, nil
 				case "esc":
 					if m.repoFilter != "" {
-						m.repoFilter = ""
+						m.setRepoFilter("")
 						m.repoCursor = clamp(m.repoCursor, 0, max(0, m.repoDisplayLen()-1))
 						return m, nil
 					}
@@ -1224,15 +1266,31 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if m.workspace != nil {
 						m.workspace.SetKind(m.workspaceKind)
 					}
+					m.invalidateRepoLocalCache()
 					m.statusMessage = "backend: " + string(m.workspaceKind)
 					return m, nil
 				case "F":
 					repo, ok := m.selectedRepo()
-					if !ok || m.workspace == nil || !m.workspace.RepoExists(repo.FullName) {
+					if !ok {
+						return m, nil
+					}
+					if !m.repoIsLocal(repo.FullName) {
+						m.statusMessage = "repo not local — clone/open first"
 						return m, nil
 					}
 					m.statusMessage = "fetching " + repo.FullName
 					return m, m.fetchRepoCmd(repo)
+				case "P":
+					repo, ok := m.selectedRepo()
+					if !ok {
+						return m, nil
+					}
+					if !m.repoIsLocal(repo.FullName) {
+						m.statusMessage = "repo not local — clone/open first"
+						return m, nil
+					}
+					m.statusMessage = "pulling " + repo.FullName
+					return m, m.pullRepoCmd(repo)
 				case "enter":
 					if m.repoDisplayLen() == 0 {
 						return m, nil
@@ -1242,7 +1300,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				if typed := repoFilterKey(msg.String()); typed != "" {
-					m.repoFilter += typed
+					m.setRepoFilter(m.repoFilter + typed)
 					m.repoCursor = clamp(m.repoCursor, 0, max(0, m.repoDisplayLen()-1))
 					return m, nil
 				}
@@ -1564,7 +1622,7 @@ func (m *model) queueRepoLaunch(launch string) (tea.Cmd, bool) {
 
 func (m *model) jumpToProjects() tea.Cmd {
 	m.mode = modeProjects
-	return m.inputBox.Focus()
+	return tea.Batch(m.inputBox.Focus(), m.refreshRecentStaleCmd())
 }
 
 func (m *model) jumpToDiff() tea.Cmd {
@@ -2208,14 +2266,14 @@ func (m *model) fetchRepoCmd(repo githubauth.Repo) tea.Cmd {
 	}
 	return func() tea.Msg {
 		if _, _, err := git.RunGit(path, "fetch", "--all", "--prune"); err != nil {
-			return repoStaleMsg{FullName: repo.FullName, Err: err}
+			return repoStaleMsg{FullName: repo.FullName, Action: "fetch", Err: err}
 		}
 		behind := 0
 		if out, _, err := git.RunGit(path, "rev-list", "--count", "HEAD..@{upstream}"); err == nil {
 			behind, _ = strconv.Atoi(strings.TrimSpace(out))
 		}
 		lastFetch, _ := git.LastFetch(path)
-		return repoStaleMsg{FullName: repo.FullName, Behind: behind, LastFetch: lastFetch}
+		return repoStaleMsg{FullName: repo.FullName, Behind: behind, LastFetch: lastFetch, Action: "fetch"}
 	}
 }
 
@@ -2226,21 +2284,102 @@ func (m *model) fetchRepoPathCmd(path, label string) tea.Cmd {
 	}
 	return func() tea.Msg {
 		if _, _, err := git.RunGit(path, "fetch", "--all", "--prune"); err != nil {
-			return repoStaleMsg{FullName: label, Err: err}
+			return repoStaleMsg{FullName: label, Action: "fetch", Err: err}
 		}
 		behind := 0
 		if out, _, err := git.RunGit(path, "rev-list", "--count", "HEAD..@{upstream}"); err == nil {
 			behind, _ = strconv.Atoi(strings.TrimSpace(out))
 		}
 		lastFetch, _ := git.LastFetch(path)
-		return repoStaleMsg{FullName: label, Behind: behind, LastFetch: lastFetch}
+		return repoStaleMsg{FullName: label, Behind: behind, LastFetch: lastFetch, Action: "fetch"}
 	}
 }
 
+func (m *model) pullRepoCmd(repo githubauth.Repo) tea.Cmd {
+	if m.workspace == nil {
+		return nil
+	}
+	path := m.workspace.RepoPath(repo.FullName)
+	if path == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		if _, _, err := git.RunGit(path, "pull", "--ff-only"); err != nil {
+			return repoStaleMsg{FullName: repo.FullName, Action: "pull", Err: err}
+		}
+		behind := 0
+		if out, _, err := git.RunGit(path, "rev-list", "--count", "HEAD..@{upstream}"); err == nil {
+			behind, _ = strconv.Atoi(strings.TrimSpace(out))
+		}
+		lastFetch, _ := git.LastFetch(path)
+		return repoStaleMsg{FullName: repo.FullName, Behind: behind, LastFetch: lastFetch, Action: "pull"}
+	}
+}
+
+func (m *model) pullRepoPathCmd(path, label string) tea.Cmd {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		if _, _, err := git.RunGit(path, "pull", "--ff-only"); err != nil {
+			return repoStaleMsg{FullName: label, Action: "pull", Err: err}
+		}
+		behind := 0
+		if out, _, err := git.RunGit(path, "rev-list", "--count", "HEAD..@{upstream}"); err == nil {
+			behind, _ = strconv.Atoi(strings.TrimSpace(out))
+		}
+		lastFetch, _ := git.LastFetch(path)
+		return repoStaleMsg{FullName: label, Behind: behind, LastFetch: lastFetch, Action: "pull"}
+	}
+}
+
+func (m *model) refreshRecentStaleCmd() tea.Cmd {
+	if m.mode != modeProjects || m.picker != pickerRepos || m.projectsView != projectsViewRecent {
+		return nil
+	}
+	rows := m.recentRows()
+	cmds := make([]tea.Cmd, 0, 5)
+	count := 0
+	for _, row := range rows {
+		if row.Kind != recentRowRepo {
+			continue
+		}
+		if row.Repo.LocalOnly {
+			if cmd := m.checkRepoPathStaleCmd(row.Repo.LocalPath, row.Repo.Repo.FullName); cmd != nil {
+				cmds = append(cmds, cmd)
+				count++
+			}
+		} else if m.repoIsLocal(row.Repo.Repo.FullName) {
+			if cmd := m.checkRepoStaleCmd(row.Repo.Repo.FullName); cmd != nil {
+				cmds = append(cmds, cmd)
+				count++
+			}
+		}
+		if count >= 5 {
+			break
+		}
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
+}
+
 func (m *model) filteredRepos() []githubauth.Repo {
+	m.ensureRepoDisplayCache()
+	return m.repoDisplayCache
+}
+
+func (m *model) ensureRepoDisplayCache() {
+	if !m.repoDisplayDirty {
+		return
+	}
 	query := strings.TrimSpace(m.repoFilter)
 	if query == "" {
-		return m.repos
+		m.repoDisplayCache = m.repos
+		m.repoDisplayDirty = false
+		return
 	}
 	out := make([]githubauth.Repo, 0, len(m.repos))
 	for _, repo := range m.repos {
@@ -2248,7 +2387,8 @@ func (m *model) filteredRepos() []githubauth.Repo {
 			out = append(out, repo)
 		}
 	}
-	return out
+	m.repoDisplayCache = out
+	m.repoDisplayDirty = false
 }
 
 func (m *model) repoDisplayRows() []githubauth.Repo {
@@ -2283,6 +2423,9 @@ func (m *model) selectedRepo() (githubauth.Repo, bool) {
 }
 
 func (m *model) recentRows() []recentRow {
+	if !m.recentRowsDirty {
+		return m.recentRowsCache
+	}
 	rows := make([]recentRow, 0, 12)
 	seen := map[string]struct{}{}
 	for _, rec := range m.settings.RecentGitHub() {
@@ -2322,7 +2465,55 @@ func (m *model) recentRows() []recentRow {
 	}
 
 	rows = append(rows, recentRow{Kind: recentRowCTA})
-	return rows
+	m.recentRowsCache = rows
+	m.recentRowsDirty = false
+	return m.recentRowsCache
+}
+
+func (m *model) ensureRepoLocalCache() {
+	if !m.repoLocalDirty {
+		return
+	}
+	cache := map[string]bool{}
+	if m.workspace != nil {
+		for _, repo := range m.repos {
+			cache[repo.FullName] = m.workspace.RepoExists(repo.FullName)
+		}
+	}
+	m.repoLocalCache = cache
+	m.repoLocalDirty = false
+}
+
+func (m *model) repoIsLocal(fullName string) bool {
+	m.ensureRepoLocalCache()
+	return m.repoLocalCache[strings.TrimSpace(fullName)]
+}
+
+func (m *model) invalidateRepoDisplayCache() {
+	m.repoDisplayDirty = true
+}
+
+func (m *model) invalidateRecentRowsCache() {
+	m.recentRowsDirty = true
+}
+
+func (m *model) invalidateRepoLocalCache() {
+	m.repoLocalDirty = true
+	m.invalidateRecentRowsCache()
+}
+
+func (m *model) invalidateRepoCaches() {
+	m.invalidateRepoDisplayCache()
+	m.invalidateRepoLocalCache()
+}
+
+func (m *model) setRepoFilter(v string) {
+	v = strings.TrimSpace(v)
+	if m.repoFilter == v {
+		return
+	}
+	m.repoFilter = v
+	m.invalidateRepoDisplayCache()
 }
 
 func (m *model) selectedRecentRow() (recentRow, bool) {
@@ -2587,6 +2778,7 @@ func (m *model) pullCmd() tea.Cmd {
 	if useMockViews {
 		return m.refreshGitCmd()
 	}
+	staleLabel := strings.TrimSpace(m.currentRepoLabel())
 	return func() tea.Msg {
 		if err := git.Pull(m.projectPath); err != nil {
 			return gitRefreshMsg{Err: err}
@@ -2595,7 +2787,12 @@ func (m *model) pullCmd() tea.Cmd {
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
-		return gitRefreshMsg{State: state, Action: "pulled latest"}
+		behind := 0
+		if out, _, err := git.RunGit(m.projectPath, "rev-list", "--count", "HEAD..@{upstream}"); err == nil {
+			behind, _ = strconv.Atoi(strings.TrimSpace(out))
+		}
+		lastFetch, _ := git.LastFetch(m.projectPath)
+		return gitRefreshMsg{State: state, Action: "pulled latest", StaleLabel: staleLabel, StaleBehind: behind, StaleLastFetch: lastFetch}
 	}
 }
 
@@ -2603,6 +2800,7 @@ func (m *model) fetchCmd() tea.Cmd {
 	if useMockViews {
 		return m.refreshGitCmd()
 	}
+	staleLabel := strings.TrimSpace(m.currentRepoLabel())
 	return func() tea.Msg {
 		if err := git.Fetch(m.projectPath); err != nil {
 			return gitRefreshMsg{Err: err}
@@ -2611,7 +2809,12 @@ func (m *model) fetchCmd() tea.Cmd {
 		if err != nil {
 			return gitRefreshMsg{Err: err}
 		}
-		return gitRefreshMsg{State: state, Action: "fetched remotes"}
+		behind := 0
+		if out, _, err := git.RunGit(m.projectPath, "rev-list", "--count", "HEAD..@{upstream}"); err == nil {
+			behind, _ = strconv.Atoi(strings.TrimSpace(out))
+		}
+		lastFetch, _ := git.LastFetch(m.projectPath)
+		return gitRefreshMsg{State: state, Action: "fetch remotes", StaleLabel: staleLabel, StaleBehind: behind, StaleLastFetch: lastFetch}
 	}
 }
 
@@ -3239,6 +3442,7 @@ func (m *model) handlePaletteAction(msg commandpallette.ActionMsg) (tea.Model, t
 		if m.workspace != nil {
 			m.workspace.SetKind(m.workspaceKind)
 		}
+		m.invalidateRepoLocalCache()
 		m.statusMessage = "backend: " + string(m.workspaceKind)
 		return m, nil
 	case "projects.new":
@@ -3257,6 +3461,7 @@ func (m *model) handlePaletteAction(msg commandpallette.ActionMsg) (tea.Model, t
 		m.authStatus = githubauth.StatusSignedOut
 		m.authDevice = githubauth.DeviceCode{}
 		m.repos = nil
+		m.invalidateRepoCaches()
 		m.picker = pickerLocal
 		return m, m.clearTokenCmd()
 	case "pi.new":
@@ -3754,6 +3959,7 @@ func (m *model) addRecent(path string) {
 		return
 	}
 	_ = m.settings.PushRecentLocal(path)
+	m.invalidateRecentRowsCache()
 }
 
 func (m *model) currentRepoLabel() string {

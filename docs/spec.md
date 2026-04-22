@@ -78,8 +78,10 @@ Footer ownership is global: `glib` owns the bottom row in every mode.
 - Ephemeral cleanup runs on app quit and skips dirty worktrees.
 - Project selection sets active repository context for `GIT`, `DIFF`, and `PI`.
 - Repo rows show materialization state badges (`[local]` / `[clone needed]`).
-- Repo rows surface freshness badges where available (`[behind N]`, `[Xd ago]`).
+- Recent-hub rows surface freshness badges for local repos (`[behind N]`, `[Xd ago]`).
 - `F` fetches selected local repo directly from PROJECTS (recent hub and full overlay).
+- `P` pulls selected local repo (`git pull --ff-only`) directly from PROJECTS (recent hub and full overlay).
+- PROJECTS recent hub refreshes stale badge data for visible recent rows on entry/return so top rows stay current.
 - Footer shows `● pi active  i resume` when PI session is live for selected repo.
 
 ## Distribution Contract

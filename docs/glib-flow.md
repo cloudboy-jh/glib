@@ -46,6 +46,14 @@ All UI uses BentoTUI v0.6.0+ bricks, recipes, and rooms.
 - Footer in PROJECTS shows: `● pi active  i resume` when a session is live.
 - Session only killed on: `/exit` slash command, new repo selection, or app quit.
 
+## 1b. PROJECTS recent hub freshness
+
+- Recent hub shows up to 5 GitHub recents + up to 5 local-only recents.
+- Local rows display freshness badges: `[behind N]` and `[Xd ago]`.
+- `F` in PROJECTS runs `git fetch --all --prune` on selected local repo and updates freshness badges.
+- `P` in PROJECTS runs `git pull --ff-only` on selected local repo and updates freshness badges.
+- Entering/returning to PROJECTS refreshes freshness checks for visible recent rows.
+
 ## 2. DIFF mode — two views
 
 ### View A: Commit History (Default)

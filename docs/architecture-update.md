@@ -41,20 +41,21 @@ Global keys always active: `p` `d` `g` `i` `t` (theme) `q` (quit).
 
 ## PROJECTS mode
 
-- Repo list: j/k move, enter open action bar, b backend toggle, r refresh.
+- Repo list: j/k move, enter open action bar, F fetch, P pull, b backend toggle, r all repos/refresh.
 - Action bar (horizontal, below repo card): `Diff` | `Git` | `Pi`.
 - `Diff` → resolves repo path, switches to DIFF mode.
 - `Git` → resolves repo path, switches to GIT mode.
 - `Pi` → resolves repo path, starts pi process, switches to PI mode.
 - Backend toggle: `local` (persisted clone root) or `ephemeral` (temp clone). Worktree mode is a future phase.
 - Repo resolution: if repo not yet cloned, clone first, then route to selected action.
+- Recent hub rows display `[behind N]` and `[Xd ago]` freshness badges for local repos.
 
 ---
 
 ## DIFF mode
 
 - Powered by `github.com/cloudboy-jh/bento-diffs`.
-- j/k scroll, ctrl+d/ctrl+u page, n/N file nav, {/} hunk nav.
+- j/k scroll, ctrl+d/ctrl+u page, tab/shift+tab file nav (n/N alias), {/} hunk nav.
 - Footer shows current file, hunk position.
 - `enter` on a file in GIT mode opens that file in DIFF mode.
 

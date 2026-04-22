@@ -78,8 +78,6 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 
 	const (
 		logoToCardGap = 1
-		cardToHelpGap = 1
-		helpToTipGap  = 1
 		statusGap     = 1
 	)
 
@@ -206,28 +204,6 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 	blockW := lipgloss.Width(block)
 	blockH := lipgloss.Height(block)
 
-	kbdStr := ""
-	if m.authStatus != githubauth.StatusAuth {
-		kbdStr = dim.Render("sign in ") + bright.Render("enter") +
-			dim.Render("   retry ") + bright.Render("r") +
-			dim.Render("   clear token ") + bright.Render("l")
-	} else if m.picker == pickerClone {
-		kbdStr = dim.Render("toggle picker ") + bright.Render("tab") +
-			dim.Render("   submit ") + bright.Render("enter")
-	} else {
-		kbdStr = dim.Render("move ") + bright.Render("j/k or arrows") +
-			dim.Render("   open/select ") + bright.Render("enter") +
-			dim.Render("   expand ") + bright.Render("l") +
-			dim.Render("   collapse ") + bright.Render("h") +
-			dim.Render("   parent ") + bright.Render("backspace") +
-			dim.Render("   mode ") + bright.Render("tab")
-	}
-	kbdW := lipgloss.Width(kbdStr)
-
-	dot := lipgloss.NewStyle().Foreground(t.Info()).Render(m.icons.Dot)
-	tipStr := dot + dim.Render("  terminal workspace. git + pi + diff.")
-	tipW := lipgloss.Width(tipStr)
-
 	status := ""
 	if m.projectPath != "" {
 		status = "project: " + m.currentRepoLabel()
@@ -240,7 +216,7 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 	}
 	statusW := lipgloss.Width(status)
 
-	stackH := wmH + logoToCardGap + blockH + cardToHelpGap + 1 + helpToTipGap + 1
+	stackH := wmH + logoToCardGap + blockH
 	if status != "" {
 		stackH += statusGap + 1
 	}
@@ -250,10 +226,7 @@ func (m *model) drawProjectsView(surf *surface.Surface, bodyH int, t theme.Theme
 	surf.Draw(max(0, (m.width-wmW)/2), y, wm)
 	y += wmH + logoToCardGap
 	surf.Draw(max(0, (m.width-blockW)/2), y, block)
-	y += blockH + cardToHelpGap
-	surf.Draw(max(0, (m.width-kbdW)/2), y, kbdStr)
-	y += 1 + helpToTipGap
-	surf.Draw(max(0, (m.width-tipW)/2), y, tipStr)
+	y += blockH
 	if status != "" {
 		y += 1 + statusGap
 		surf.Draw(max(0, (m.width-statusW)/2), y, lipgloss.NewStyle().Foreground(t.TextMuted()).Render(status))
@@ -301,8 +274,11 @@ func (m *model) drawRecentProjectsView(surf *surface.Surface, bodyH int, t theme
 		name := row.Repo.Repo.FullName
 		if row.Repo.LocalOnly {
 			name += "  [local-only]"
-			if stale, ok := m.repoStale[row.Repo.Repo.FullName]; ok && !stale.LastFetch.IsZero() {
-				name += "  [" + git.RelativeTime(stale.LastFetch) + "]"
+			if stale, ok := m.repoStale[row.Repo.Repo.FullName]; ok {
+				name += fmt.Sprintf("  [behind %d]", stale.Behind)
+				if !stale.LastFetch.IsZero() {
+					name += "  [" + git.RelativeTime(stale.LastFetch) + "]"
+				}
 			}
 			lines = append(lines, style.Render(padRow(prefix+name)))
 			continue
@@ -310,20 +286,16 @@ func (m *model) drawRecentProjectsView(surf *surface.Surface, bodyH int, t theme
 		if row.Repo.Repo.Private {
 			name += " (private)"
 		}
-		if m.workspace != nil {
-			if m.workspace.RepoExists(row.Repo.Repo.FullName) {
-				name += "  [local]"
-				if stale, ok := m.repoStale[row.Repo.Repo.FullName]; ok {
-					if stale.Behind > 0 {
-						name += fmt.Sprintf("  [behind %d]", stale.Behind)
-					}
-					if !stale.LastFetch.IsZero() {
-						name += "  [" + git.RelativeTime(stale.LastFetch) + "]"
-					}
+		if m.repoIsLocal(row.Repo.Repo.FullName) {
+			name += "  [local]"
+			if stale, ok := m.repoStale[row.Repo.Repo.FullName]; ok {
+				name += fmt.Sprintf("  [behind %d]", stale.Behind)
+				if !stale.LastFetch.IsZero() {
+					name += "  [" + git.RelativeTime(stale.LastFetch) + "]"
 				}
-			} else {
-				name += "  [clone needed]"
 			}
+		} else {
+			name += "  [clone needed]"
 		}
 		lines = append(lines, style.Render(padRow(prefix+name)))
 	}
@@ -344,7 +316,6 @@ func (m *model) drawRecentProjectsView(surf *surface.Surface, bodyH int, t theme
 	wmH := lipgloss.Height(wm)
 	blockW := lipgloss.Width(block)
 	blockH := lipgloss.Height(block)
-	actionKbd := dim.Render("move ") + bright.Render("j/k") + dim.Render("  open ") + bright.Render("enter") + dim.Render("  fetch ") + bright.Render("F") + dim.Render("  all repos ") + bright.Render("r")
 	actionBar := ""
 	if m.repoActionOpen {
 		item := func(label string, active bool) string {
@@ -359,10 +330,9 @@ func (m *model) drawRecentProjectsView(surf *surface.Surface, bodyH int, t theme
 		piItem := item(fmt.Sprintf("%s Pi — AI agent", m.icons.PI), m.repoActionCursor == 2)
 		barLine := diffItem + "   " + gitItem + "   " + piItem
 		actionBar = lipgloss.NewStyle().Background(t.BackgroundPanel()).Foreground(t.Text()).Padding(0, 1).Render(barLine)
-		actionKbd = dim.Render("choose ") + bright.Render("h/l or arrows") + dim.Render("  run ") + bright.Render("enter") + dim.Render("  back ") + bright.Render("esc")
 	}
 
-	stackH := wmH + 1 + blockH + 1 + 1
+	stackH := wmH + 1 + blockH
 	if actionBar != "" {
 		stackH += lipgloss.Height(actionBar) + 1
 	}
@@ -375,7 +345,6 @@ func (m *model) drawRecentProjectsView(surf *surface.Surface, bodyH int, t theme
 		surf.Draw(max(0, (m.width-lipgloss.Width(actionBar))/2), y, actionBar)
 		y += lipgloss.Height(actionBar) + 1
 	}
-	surf.Draw(max(0, (m.width-lipgloss.Width(actionKbd))/2), y, actionKbd)
 }
 
 func (m *model) drawRepoOverlayView(surf *surface.Surface, bodyH int, t theme.Theme, dim, bright lipgloss.Style) {
@@ -428,20 +397,16 @@ func (m *model) drawRepoOverlayView(surf *surface.Surface, bodyH int, t theme.Th
 			if repo.Private {
 				name += " (private)"
 			}
-			if m.workspace != nil {
-				if m.workspace.RepoExists(repo.FullName) {
-					name += "  [local]"
-					if stale, ok := m.repoStale[repo.FullName]; ok {
-						if stale.Behind > 0 {
-							name += fmt.Sprintf("  [behind %d]", stale.Behind)
-						}
-						if !stale.LastFetch.IsZero() {
-							name += "  [" + git.RelativeTime(stale.LastFetch) + "]"
-						}
+			if m.repoIsLocal(repo.FullName) {
+				name += "  [local]"
+				if stale, ok := m.repoStale[repo.FullName]; ok {
+					name += fmt.Sprintf("  [behind %d]", stale.Behind)
+					if !stale.LastFetch.IsZero() {
+						name += "  [" + git.RelativeTime(stale.LastFetch) + "]"
 					}
-				} else {
-					name += "  [clone needed]"
 				}
+			} else {
+				name += "  [clone needed]"
 			}
 			lines = append(lines, style.Render(padRow(marker+prefix+name)))
 		}
@@ -472,7 +437,6 @@ func (m *model) drawRepoOverlayView(surf *surface.Surface, bodyH int, t theme.Th
 	blockW := lipgloss.Width(block)
 	blockH := lipgloss.Height(block)
 
-	actionKbd := dim.Render("move ") + bright.Render("j/k") + dim.Render("  filter ") + bright.Render("type/backspace") + dim.Render("  actions ") + bright.Render("enter") + dim.Render("  backend ") + bright.Render("b") + dim.Render("  refresh ") + bright.Render("r") + dim.Render("  fetch ") + bright.Render("F")
 	actionBar := ""
 	if m.repoActionOpen {
 		item := func(label string, active bool) string {
@@ -495,10 +459,9 @@ func (m *model) drawRepoOverlayView(surf *surface.Surface, bodyH int, t theme.Th
 			Padding(0, 1).
 			Width(barW).
 			Render(barLine)
-		actionKbd = dim.Render("choose ") + bright.Render("h/l or arrows") + dim.Render("  run ") + bright.Render("enter") + dim.Render("  back ") + bright.Render("esc")
 	}
 
-	stackH := blockH + 1 + 1
+	stackH := blockH
 	if actionBar != "" {
 		stackH += lipgloss.Height(actionBar) + 1
 	}
@@ -513,8 +476,6 @@ func (m *model) drawRepoOverlayView(surf *surface.Surface, bodyH int, t theme.Th
 		surf.Draw(max(0, (m.width-lipgloss.Width(actionBar))/2), y, actionBar)
 		y += lipgloss.Height(actionBar) + 1
 	}
-
-	surf.Draw(max(0, (m.width-lipgloss.Width(actionKbd))/2), y, actionKbd)
 }
 
 func (m *model) drawDiffView(surf *surface.Surface, bodyW, bodyH int, t theme.Theme) {
@@ -728,9 +689,9 @@ func (m *model) syncFooter() {
 			if m.repoActionOpen {
 				cfg.Context = m.icons.Projects + " h/l choose  enter run  esc back"
 			} else if m.projectsView == projectsViewAllOverlay {
-				cfg.Context = m.icons.Projects + " j/k move  type filter  enter actions  esc close"
+				cfg.Context = m.icons.Projects + " j/k move  type filter  enter actions  F fetch  P pull  esc close"
 			} else {
-				cfg.Context = m.icons.Projects + " j/k move  enter actions  F fetch  r all repos"
+				cfg.Context = m.icons.Projects + " j/k move  enter actions  F fetch  P pull  r all repos"
 			}
 			cfg.Position = ""
 			cfg.Scroll = string(m.workspaceKind)
@@ -748,7 +709,7 @@ func (m *model) syncFooter() {
 			cfg.Context = m.icons.Diff + " j/k move  enter open  esc projects"
 			cfg.Position = ""
 		} else {
-			cfg.Context = m.icons.Diff + " j/k scroll  n/N file (tab too)  i send + switch pi  esc history"
+			cfg.Context = m.icons.Diff + " j/k scroll  tab/shift+tab file  i send to pi  esc history"
 		}
 		if m.diffView == diffViewOpen && m.diffViewer != nil {
 			st := m.diffViewer.State()

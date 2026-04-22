@@ -9,6 +9,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - No unreleased changes.
 
+## [0.3.9] - 2026-04-22
+
+### Added
+
+- **PROJECTS pull shortcut**: `P` now runs `git pull --ff-only` for the selected local repository from both the recent hub and full overlay.
+- **Recent hub stale refresh sweep**: entering or returning to PROJECTS now refreshes freshness state (`behind` + `last fetch age`) for visible recent rows.
+
+### Changed
+
+- **Projects footer hints** now expose both sync actions directly: `F fetch` and `P pull`.
+- **Diff footer hint wording** now uses `tab/shift+tab` as primary file navigation (with `n/N` retained as alias).
+- **Home-screen key legend cleanup**: duplicate inline key-help bars were removed so footer remains the single source of key hints.
+
+### Fixed
+
+- **Freshness badge consistency**: fetch/pull actions now immediately update home-screen stale badges for the affected repo.
+- **Cross-mode stale sync**: fetch/pull from GIT mode now updates PROJECTS freshness badges without waiting for manual movement/refresh.
+
 ## [0.3.8] - 2026-04-21
 
 ### Added

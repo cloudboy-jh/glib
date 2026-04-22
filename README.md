@@ -146,6 +146,7 @@ PROJECTS
 - `j/k` or arrows — move
 - `enter` — open action chooser
 - `F` — fetch selected local repo
+- `P` — pull selected local repo (`--ff-only`)
 - `r` — open full repos overlay / refresh in overlay
 - `b` — backend toggle (local/ephemeral)
 - `n` — new project
@@ -161,7 +162,8 @@ PROJECTS
 ### Diff (Viewer)
 - `j/k` — scroll
 - `ctrl+d/ctrl+u` — page down/up
-- `n/N` — next/previous file
+- `tab/shift+tab` — next/previous file
+- `n/N` — next/previous file (alias)
 - `c` — toggle to commit history
 - `i` — send current diff to PI
 - `esc/q` — back to commit history
